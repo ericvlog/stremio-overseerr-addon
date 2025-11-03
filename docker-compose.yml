@@ -5,6 +5,7 @@ services:
     image: plsharevme/stremio-overseerr-addon:latest
     container_name: stremio-overseerr-addon
     restart: unless-stopped
+    network_mode: "host"
     ports:
       - "7000:7000"
     environment:

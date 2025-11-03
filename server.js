@@ -163,7 +163,7 @@ app.get("/manifest.json", (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
         id: "org.overmio.addon",
-        version: "1.4.0",
+        version: "1.5.0",
         name: "OverMio Addon",
         description: "Request movies and shows in Overseerr",
         resources: ["stream"],
@@ -179,25 +179,33 @@ app.get("/video/:type/:tmdbId", async (req, res) => {
     const { title, season, episode, request_type } = req.query;
     const mediaName = title || 'Unknown';
 
-    // Create unique request key based on request type
-    const requestKey = request_type === 'series'
-        ? `${type}-${tmdbId}-series`
-        : `${type}-${tmdbId}-season-${season}`;
+    // Create unique request key based on request type AND media type
+    let requestKey;
+    if (type === 'movie') {
+        // Movies don't have seasons - use simple key
+        requestKey = `movie-${tmdbId}`;
+    } else {
+        // TV shows use season/series based keys
+        requestKey = request_type === 'series'
+            ? `series-${tmdbId}-series`
+            : `series-${tmdbId}-season-${season}`;
+    }
 
     console.log(`[VIDEO] Video requested for ${type} ${tmdbId} - ${mediaName}`,
         season ? `Season ${season}` : '',
         episode ? `Episode ${episode}` : '',
-        request_type ? `Type: ${request_type}` : ''
+        request_type ? `Type: ${request_type}` : '',
+        `Key: ${requestKey}`
     );
 
     // Trigger Overseerr request in background
     if (!requestResults.has(requestKey)) {
-        console.log(`[VIDEO] Making background request for ${mediaName} (${request_type || 'season'})`);
+        console.log(`[VIDEO] Making background request for ${mediaName} (${request_type || (type === 'movie' ? 'movie' : 'season')})`);
         requestResults.set(requestKey, { processing: true });
 
         const seasonNum = season ? parseInt(season) : null;
         const episodeNum = episode ? parseInt(episode) : null;
-        const reqType = request_type || 'season';
+        const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
 
         makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType)
             .then(result => {
@@ -438,11 +446,18 @@ app.get("/health", (req, res) => {
 app.get("/status/:type/:tmdbId", (req, res) => {
     const { type, tmdbId } = req.params;
     const { season, request_type } = req.query;
-    const requestKey = request_type
-        ? `${type}-${tmdbId}-${request_type}`
-        : season
-            ? `${type}-${tmdbId}-season-${season}`
-            : `${type}-${tmdbId}`;
+    
+    // Use the same key generation logic as video endpoint
+    let requestKey;
+    if (type === 'movie') {
+        requestKey = `movie-${tmdbId}`;
+    } else {
+        requestKey = request_type
+            ? `series-${tmdbId}-${request_type}`
+            : season
+                ? `series-${tmdbId}-season-${season}`
+                : `series-${tmdbId}`;
+    }
 
     if (requestResults.has(requestKey)) {
         res.json(requestResults.get(requestKey));
