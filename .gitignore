@@ -1,6 +1,7 @@
 node_modules
 .env
-.env.*
+.env.personal
+.env.backup
 docker-compose.override.yml
 *.log
 .DS_Store
