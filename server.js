@@ -518,7 +518,7 @@ app.get("/video-test", async (req, res) => {
     await serveVideo(res, "Test Video");
 });
 
-// Configuration page
+// Configuration page - UPDATED with Install in Stremio button
 app.get("/config", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -531,11 +531,13 @@ app.get("/config", (req, res) => {
             input { width: 100%; padding: 10px; margin: 5px 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; }
             button { background: #28a745; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
             .btn-test { background: #17a2b8; }
+            .btn-install { background: #ff6b35; }
             .addon-url { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; font-family: monospace; word-break: break-all; }
             .test-result { margin: 10px 0; padding: 10px; border-radius: 4px; }
             .test-success { background: #155724; color: #d4edda; }
             .test-error { background: #721c24; color: #f8d7da; }
             .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .success { background: #155724; color: #d4edda; padding: 12px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
@@ -543,6 +545,10 @@ app.get("/config", (req, res) => {
         
         <div class="warning">
             <strong>Docker Users:</strong> If you experience DNS issues, use your server's IP address (e.g., http://192.168.1.100:5055) instead of a hostname for the Overseerr URL.
+        </div>
+
+        <div class="success">
+            <strong>Vercel Users:</strong> Your addon is deployed on Vercel's global CDN. Video playback and API calls should work reliably.
         </div>
         
         <div class="container">
@@ -567,20 +573,30 @@ app.get("/config", (req, res) => {
         <div id="result" style="display: none;" class="container">
             <h3>📦 Your Addon URL</h3>
             <div class="addon-url" id="addonUrl"></div>
-            <p>Copy this URL and install it in Stremio:</p>
+            <p><strong>Installation Options:</strong></p>
+            
+            <div style="margin: 15px 0;">
+                <button onclick="installInStremio()" class="btn-install">🚀 Install in Stremio (Auto)</button>
+                <p><small>This will automatically open Stremio and install the addon</small></p>
+            </div>
+            
+            <p><strong>OR Manual Installation:</strong></p>
             <ol>
                 <li>Open Stremio</li>
                 <li>Click the puzzle piece icon (Addons)</li>
                 <li>Click "Community Addons"</li>
                 <li>Paste the URL above and click "Install"</li>
             </ol>
-            <p><strong>Note:</strong> Test video playback first to ensure it works in your browser!</p>
+            
+            <p><strong>Note:</strong> Always test video playback first!</p>
             <a href="/video-test" target="_blank" class="btn-test">Test Video Playback</a>
         </div>
 
         <div id="testResults" class="container"></div>
 
         <script>
+            let currentAddonUrl = '';
+
             async function testConfiguration() {
                 const config = {
                     tmdbKey: document.getElementById('tmdbKey').value,
@@ -638,13 +654,59 @@ app.get("/config", (req, res) => {
                 const configJson = JSON.stringify(config);
                 const configBase64 = btoa(unescape(encodeURIComponent(configJson)));
                 
-                const addonUrl = window.location.origin + '/configured/' + configBase64 + '/manifest.json';
+                currentAddonUrl = window.location.origin + '/configured/' + configBase64 + '/manifest.json';
                 
-                document.getElementById('addonUrl').textContent = addonUrl;
+                document.getElementById('addonUrl').textContent = currentAddonUrl;
                 document.getElementById('result').style.display = 'block';
                 
                 document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
             }
+
+            function installInStremio() {
+                if (!currentAddonUrl) {
+                    alert('Please generate an addon URL first');
+                    return;
+                }
+
+                // Convert to stremio protocol URL
+                const stremioUrl = 'stremio://' + currentAddonUrl.replace(/^https?:\\/\\//, '');
+                
+                console.log('Opening Stremio with URL:', stremioUrl);
+                
+                // Try to open Stremio
+                window.location.href = stremioUrl;
+                
+                // Fallback: show instructions if Stremio doesn't open
+                setTimeout(() => {
+                    if (!document.hidden) {
+                        alert('Stremio not detected. Please make sure Stremio is installed and running, or manually copy the addon URL.');
+                    }
+                }, 1000);
+            }
+
+            // Auto-fill with URL parameters if present
+            function getUrlParam(name) {
+                const urlParams = new URLSearchParams(window.location.search);
+                return urlParams.get(name);
+            }
+
+            // Check for pre-filled values from URL
+            window.addEventListener('load', () => {
+                const tmdbKey = getUrlParam('tmdbKey');
+                const overseerrUrl = getUrlParam('overseerrUrl');
+                const overseerrApi = getUrlParam('overseerrApi');
+
+                if (tmdbKey) document.getElementById('tmdbKey').value = tmdbKey;
+                if (overseerrUrl) document.getElementById('overseerrUrl').value = overseerrUrl;
+                if (overseerrApi) document.getElementById('overseerrApi').value = overseerrApi;
+
+                // Auto-generate if all parameters are present
+                if (tmdbKey && overseerrUrl && overseerrApi) {
+                    setTimeout(() => {
+                        generateAddon();
+                    }, 500);
+                }
+            });
         </script>
     </body>
     </html>
@@ -688,3 +750,6 @@ app.listen(PORT, '0.0.0.0', () => {
         console.log(`🎥 Local video not found, using GitHub redirect`);
     }
 });
+
+// Export for Vercel
+export default app;
