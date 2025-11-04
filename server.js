@@ -15,7 +15,7 @@ const SERVER_URL = process.env.VERCEL_URL
 // Store request results
 const requestResults = new Map();
 
-// Improved video serving function
+// Simple video serving function
 async function serveVideo(res, mediaName) {
     console.log(`[VIDEO] Serving video for ${mediaName}`);
     
@@ -66,39 +66,7 @@ async function serveVideo(res, mediaName) {
     return true;
 }
 
-// Function to properly decode Overseerr API key
-function decodeOverseerrApi(encodedApiKey) {
-    try {
-        console.log(`[API KEY] Original: ${encodedApiKey.substring(0, 20)}...`);
-        
-        // If it's already a UUID format (with dashes), return as-is
-        if (/^[a-fA-F0-9\-]{20,}$/.test(encodedApiKey)) {
-            console.log(`[API KEY] Already valid UUID format`);
-            return encodedApiKey;
-        }
-        
-        // Try to decode as base64
-        try {
-            const buffer = Buffer.from(encodedApiKey, 'base64');
-            const decoded = buffer.toString('utf8');
-            
-            // Check if decoded result looks like a valid API key
-            if (decoded.length >= 20 && /^[a-zA-Z0-9\-_]+$/.test(decoded)) {
-                console.log(`[API KEY] Successfully decoded from base64: ${decoded.substring(0, 20)}...`);
-                return decoded;
-            }
-        } catch (e) {
-            console.log(`[API KEY] Base64 decode failed, using original`);
-        }
-        
-        return encodedApiKey;
-    } catch (error) {
-        console.error(`[API KEY] Error decoding: ${error.message}`);
-        return encodedApiKey;
-    }
-}
-
-// Improved Overseerr request with Vercel-specific fixes
+// SIMPLE Overseerr request - no complex API key decoding
 async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, episodeNumber = null, requestType = 'season', userConfig) {
     try {
         let requestDescription = mediaName;
@@ -149,77 +117,48 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
         }
         overseerrUrl = overseerrUrl.replace(/\/$/, '');
 
-        // Decode the API key properly
-        const decodedApiKey = decodeOverseerrApi(userConfig.overseerrApi);
-
         console.log(`[REQUEST] Making request to: ${overseerrUrl}/api/v1/request`);
-        console.log(`[REQUEST] Using API key: ${decodedApiKey.substring(0, 10)}...`);
+        console.log(`[REQUEST] Using API key: ${userConfig.overseerrApi.substring(0, 10)}...`);
 
-        // Vercel-specific: Add proper headers and timeout
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
-        try {
-            const response = await fetch(
-                `${overseerrUrl}/api/v1/request`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'X-Api-Key': decodedApiKey,
-                        'Content-Type': 'application/json',
-                        'User-Agent': 'Stremio-Overseerr-Addon/1.0.0'
-                    },
-                    body: JSON.stringify(requestBody),
-                    signal: controller.signal
-                }
-            );
-
-            clearTimeout(timeoutId);
-
-            if (response.ok) {
-                const data = await response.json();
-                console.log(`[REQUEST] Success for: ${requestDescription}`);
-                return { success: true, data: data };
-            } else {
-                const errorText = await response.text();
-                console.error(`[REQUEST] Failed: HTTP ${response.status} - ${errorText}`);
-                
-                let userError = `HTTP ${response.status}`;
-                if (response.status === 401) {
-                    userError = `Unauthorized (401) - Invalid API key`;
-                } else if (response.status === 403) {
-                    userError = `Forbidden (403) - API key rejected`;
-                } else if (response.status === 404) {
-                    userError = `Not Found (404) - Check Overseerr URL`;
-                } else if (response.status >= 500) {
-                    userError = `Overseerr Server Error (${response.status})`;
-                }
-                
-                return {
-                    success: false,
-                    error: userError,
-                    details: errorText
-                };
+        const response = await fetch(
+            `${overseerrUrl}/api/v1/request`,
+            {
+                method: 'POST',
+                headers: {
+                    'X-Api-Key': userConfig.overseerrApi, // USE AS-IS, no decoding
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
             }
-        } catch (fetchError) {
-            clearTimeout(timeoutId);
-            throw fetchError;
+        );
+
+        if (response.ok) {
+            const data = await response.json();
+            console.log(`[REQUEST] Success for: ${requestDescription}`);
+            return { success: true, data: data };
+        } else {
+            const errorText = await response.text();
+            console.error(`[REQUEST] Failed: HTTP ${response.status} - ${errorText}`);
+            
+            let userError = `HTTP ${response.status}`;
+            if (response.status === 401) {
+                userError = `Unauthorized (401) - Check your Overseerr API key`;
+            } else if (response.status === 403) {
+                userError = `Forbidden (403) - API key rejected`;
+            } else if (response.status === 404) {
+                userError = `Not Found (404) - Check your Overseerr URL`;
+            }
+            
+            return {
+                success: false,
+                error: userError
+            };
         }
     } catch (error) {
         console.error('[REQUEST] Failed:', error.message);
-        
-        let userFriendlyError = error.message;
-        if (error.name === 'AbortError') {
-            userFriendlyError = `Request timeout - Overseerr server took too long to respond`;
-        } else if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
-            userFriendlyError = `DNS resolution failed - cannot reach ${userConfig.overseerrUrl}`;
-        } else if (error.message.includes('fetch failed')) {
-            userFriendlyError = `Network error - cannot connect to Overseerr`;
-        }
-        
         return {
             success: false,
-            error: userFriendlyError
+            error: error.message
         };
     }
 }
@@ -344,9 +283,6 @@ app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
         makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType, userConfig)
             .then(result => {
                 console.log(`[BACKGROUND] Request completed for ${mediaName}: ${result.success ? 'SUCCESS' : 'FAILED'}`);
-                if (!result.success) {
-                    console.log(`[BACKGROUND] Error: ${result.error}`);
-                }
                 requestResults.set(requestKey, result);
             })
             .catch(error => {
@@ -466,7 +402,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// Configuration testing endpoint
+// SIMPLE Configuration testing endpoint
 app.post("/api/test-configuration", express.json(), async (req, res) => {
     try {
         const { tmdbKey, overseerrUrl, overseerrApi } = req.body;
@@ -489,7 +425,7 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             results.push({ service: 'TMDB', status: 'error', message: `Connection failed: ${error.message}` });
         }
 
-        // Test Overseerr API
+        // Test Overseerr API - SIMPLE, no complex decoding
         try {
             let normalizedUrl = overseerrUrl;
             if (!normalizedUrl.startsWith('http')) {
@@ -497,19 +433,11 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             }
             normalizedUrl = normalizedUrl.replace(/\/$/, '');
             
-            const decodedApiKey = decodeOverseerrApi(overseerrApi);
+            console.log(`[TEST] Testing Overseerr with URL: ${normalizedUrl}`);
             
-            console.log(`[TEST] Testing Overseerr with URL: ${normalizedUrl}, API key: ${decodedApiKey.substring(0, 10)}...`);
-            
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
-
             const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
-                headers: { 'X-Api-Key': decodedApiKey },
-                signal: controller.signal
+                headers: { 'X-Api-Key': overseerrApi } // Use API key AS-IS
             });
-
-            clearTimeout(timeoutId);
             
             if (overseerrResponse.ok) {
                 results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
@@ -521,12 +449,8 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
                 results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
             }
         } catch (error) {
-            if (error.name === 'AbortError') {
-                results.push({ service: 'Overseerr', status: 'error', message: 'Connection timeout - Overseerr server not responding' });
-            } else if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
-                results.push({ service: 'Overseerr', status: 'error', message: 'DNS resolution failed - cannot reach the URL' });
-            } else if (error.message.includes('fetch failed')) {
-                results.push({ service: 'Overseerr', status: 'error', message: 'Network error - cannot connect to Overseerr' });
+            if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
+                results.push({ service: 'Overseerr', status: 'error', message: 'DNS resolution failed' });
             } else {
                 results.push({ service: 'Overseerr', status: 'error', message: `Connection failed: ${error.message}` });
             }
@@ -560,16 +484,11 @@ app.get("/", (req, res) => {
             a { color: #9f9; }
             .container { background: #1a1a1a; padding: 20px; border-radius: 8px; margin: 20px 0; }
             .btn { background: #28a745; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; display: inline-block; margin: 5px; }
-            .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <h1>🎬 Stremio Overseerr Addon</h1>
         <p>Server running: ${SERVER_URL}</p>
-        
-        <div class="info">
-            <strong>✅ Auto-API Key Decoding:</strong> The system automatically handles base64 encoded API keys. Users can paste either format.
-        </div>
         
         <div class="container">
             <h2>🔧 Configuration</h2>
@@ -616,15 +535,10 @@ app.get("/config", (req, res) => {
             .test-result { margin: 10px 0; padding: 10px; border-radius: 4px; }
             .test-success { background: #155724; color: #d4edda; }
             .test-error { background: #721c24; color: #f8d7da; }
-            .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <h1>⚙️ Configure Stremio Overseerr Addon</h1>
-        
-        <div class="info">
-            <strong>🔄 Auto-API Key Support:</strong> The system automatically handles base64 encoded API keys. Paste either format - it will work!
-        </div>
         
         <div class="container">
             <form id="configForm">
@@ -637,9 +551,8 @@ app.get("/config", (req, res) => {
                 <small>Your Overseerr instance URL</small>
                 
                 <h3>Overseerr API Key *</h3>
-                <input type="text" id="overseerrApi" placeholder="Your Overseerr API Key (any format)" required>
-                <small>Get from Overseerr: Settings → API Keys → Generate New API Key</small>
-                <small style="color: #8ef;">✅ Auto-decoding supported: Use raw key or base64 encoded</small>
+                <input type="text" id="overseerrApi" placeholder="Your Overseerr API Key" required>
+                <small>Get from Overseerr: Settings → API Keys</small>
                 
                 <button type="button" onclick="generateAddon()">Generate Addon URL</button>
                 <button type="button" onclick="testConfiguration()" class="btn-test">Test Configuration</button>
