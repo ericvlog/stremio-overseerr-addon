@@ -1,709 +1,742 @@
-import express from "express";
-import fetch from "node-fetch";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+const express = require('express');
+const fetch = require('node-fetch');
+const { base64encode, base64decode } = require('base64url');
+const dns = require('dns').promises;
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+app.use(express.json());
 
+// Configuration
 const PORT = process.env.PORT || 3000;
-const SERVER_URL = process.env.VERCEL_URL 
-  ? `https://${process.env.VERCEL_URL}`
-  : (process.env.SERVER_URL || `http://localhost:${PORT}`);
+const TMDB_API_KEY = 'b9ec03e24520c344670f7a67d5e8c5f9';
 
-// Store request results
-const requestResults = new Map();
+// Enhanced logging utility
+class Logger {
+  static generateId() {
+    return Math.random().toString(36).substring(2, 10);
+  }
 
-// Simple video serving function
-async function serveVideo(res, mediaName) {
-    console.log(`[VIDEO] Serving video for ${mediaName}`);
-    
-    // Try local file first (for Docker/local)
-    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
-    if (fs.existsSync(localVideoPath)) {
-        console.log(`[VIDEO] Serving local video file`);
-        
-        const stat = fs.statSync(localVideoPath);
-        const fileSize = stat.size;
-        const range = res.req.headers.range;
-
-        // Set proper video headers
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Cache-Control', 'public, max-age=3600');
-
-        // Handle range requests for video seeking
-        if (range) {
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            const chunksize = (end - start) + 1;
-            
-            console.log(`[VIDEO] Range request: ${start}-${end}, chunk size: ${chunksize}`);
-            
-            const file = fs.createReadStream(localVideoPath, { start, end });
-            const head = {
-                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                'Content-Length': chunksize,
-            };
-            res.writeHead(206, head);
-            file.pipe(res);
-        } else {
-            // Serve entire video
-            const head = {
-                'Content-Length': fileSize,
-            };
-            res.writeHead(200, head);
-            fs.createReadStream(localVideoPath).pipe(res);
-        }
-        return true;
-    }
-
-    // Fallback: Use redirect (works everywhere)
-    console.log(`[VIDEO] Local video not found, redirecting to GitHub`);
-    res.redirect('https://github.com/ericvlog/stremio-overseerr-addon/raw/refs/heads/main/wait.mp4');
-    return true;
-}
-
-// SIMPLE Overseerr request - no complex API key decoding
-async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, episodeNumber = null, requestType = 'season', userConfig) {
-    try {
-        let requestDescription = mediaName;
-        if (seasonNumber !== null && episodeNumber !== null) {
-            if (requestType === 'season') {
-                requestDescription = `${mediaName} Season ${seasonNumber}`;
-            } else {
-                requestDescription = `${mediaName} (Full Series)`;
-            }
-        }
-
-        console.log(`[REQUEST] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - ${requestDescription}`);
-
-        const requestBody = {
-            mediaId: parseInt(tmdbId),
-            mediaType: type === 'movie' ? 'movie' : 'tv'
-        };
-
-        if (type === 'series') {
-            if (requestType === 'season' && seasonNumber !== null) {
-                requestBody.seasons = [seasonNumber];
-            } else if (requestType === 'series') {
-                try {
-                    const tmdbResponse = await fetch(
-                        `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${userConfig.tmdbKey}`
-                    );
-                    
-                    if (tmdbResponse.ok) {
-                        const tvData = await tmdbResponse.json();
-                        const allSeasons = tvData.seasons
-                            .filter(season => season.season_number > 0)
-                            .map(season => season.season_number);
-                        
-                        requestBody.seasons = allSeasons;
-                    } else {
-                        requestBody.seasons = [seasonNumber || 1];
-                    }
-                } catch (tmdbError) {
-                    requestBody.seasons = [seasonNumber || 1];
-                }
-            }
-        }
-
-        // Validate and normalize Overseerr URL
-        let overseerrUrl = userConfig.overseerrUrl;
-        if (!overseerrUrl.startsWith('http')) {
-            overseerrUrl = 'https://' + overseerrUrl;
-        }
-        overseerrUrl = overseerrUrl.replace(/\/$/, '');
-
-        console.log(`[REQUEST] Making request to: ${overseerrUrl}/api/v1/request`);
-        console.log(`[REQUEST] Using API key: ${userConfig.overseerrApi.substring(0, 10)}...`);
-
-        const response = await fetch(
-            `${overseerrUrl}/api/v1/request`,
-            {
-                method: 'POST',
-                headers: {
-                    'X-Api-Key': userConfig.overseerrApi, // USE AS-IS, no decoding
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(requestBody)
-            }
-        );
-
-        if (response.ok) {
-            const data = await response.json();
-            console.log(`[REQUEST] Success for: ${requestDescription}`);
-            return { success: true, data: data };
-        } else {
-            const errorText = await response.text();
-            console.error(`[REQUEST] Failed: HTTP ${response.status} - ${errorText}`);
-            
-            let userError = `HTTP ${response.status}`;
-            if (response.status === 401) {
-                userError = `Unauthorized (401) - Check your Overseerr API key`;
-            } else if (response.status === 403) {
-                userError = `Forbidden (403) - API key rejected`;
-            } else if (response.status === 404) {
-                userError = `Not Found (404) - Check your Overseerr URL`;
-            }
-            
-            return {
-                success: false,
-                error: userError
-            };
-        }
-    } catch (error) {
-        console.error('[REQUEST] Failed:', error.message);
-        return {
-            success: false,
-            error: error.message
-        };
-    }
-}
-
-// Parse Stremio ID formats
-function parseStremioId(id, type) {
-    console.log(`[PARSER] Parsing ID: ${id} for type: ${type}`);
-
-    if (type === 'movie' && id.startsWith('tt')) {
-        return { imdbId: id, season: null, episode: null };
-    }
-
-    if (type === 'series') {
-        if (id.includes(':')) {
-            const parts = id.split(':');
-            if (parts.length === 3) {
-                return {
-                    imdbId: parts[0],
-                    season: parseInt(parts[1]),
-                    episode: parseInt(parts[2])
-                };
-            }
-        } else if (id.startsWith('tt')) {
-            return { imdbId: id, season: null, episode: null };
-        }
-    }
-
-    if (/^\d+$/.test(id)) {
-        return { tmdbId: parseInt(id), season: null, episode: null };
-    }
-
-    console.log(`[PARSER] Unsupported ID format: ${id}`);
-    return null;
-}
-
-// Configuration Decoding for Torrentio-style URLs
-function decodeConfig(configString) {
-    try {
-        const configJson = Buffer.from(configString, 'base64').toString('utf8');
-        const config = JSON.parse(configJson);
-        
-        if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
-            throw new Error('Missing required configuration fields');
-        }
-        
-        return config;
-    } catch (error) {
-        console.error('[CONFIG] Error decoding configuration:', error.message);
-        return null;
-    }
-}
-
-function encodeConfig(config) {
-    const configObj = {
-        tmdbKey: config.tmdbKey,
-        overseerrUrl: config.overseerrUrl,
-        overseerrApi: config.overseerrApi,
-        v: '1.0'
+  static log(level, requestId, component, message, data = {}) {
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+      timestamp,
+      level,
+      requestId,
+      component,
+      message,
+      ...data
     };
-    
-    const configJson = JSON.stringify(configObj);
-    return Buffer.from(configJson).toString('base64');
+    console.log(JSON.stringify(logEntry));
+  }
+
+  static info(requestId, component, message, data = {}) {
+    this.log('INFO', requestId, component, message, data);
+  }
+
+  static error(requestId, component, message, data = {}) {
+    this.log('ERROR', requestId, component, message, data);
+  }
+
+  static warn(requestId, component, message, data = {}) {
+    this.log('WARN', requestId, component, message, data);
+  }
+
+  static debug(requestId, component, message, data = {}) {
+    this.log('DEBUG', requestId, component, message, data);
+  }
 }
 
-// Configured Manifest
-app.get("/configured/:config/manifest.json", (req, res) => {
-    const { config } = req.params;
-    
-    console.log(`[MANIFEST] Configured manifest requested with config: ${config.substring(0, 20)}...`);
-    
-    const userConfig = decodeConfig(config);
-    if (!userConfig) {
-        return res.status(400).json({ error: 'Invalid configuration' });
+// Enhanced network diagnostics
+class NetworkDiagnostics {
+  static async diagnoseHostname(hostname, requestId) {
+    try {
+      Logger.info(requestId, 'DNS', `Resolving hostname: ${hostname}`);
+      const addresses = await dns.resolve4(hostname);
+      Logger.info(requestId, 'DNS', `Resolved successfully`, { addresses });
+      return { success: true, addresses };
+    } catch (error) {
+      Logger.error(requestId, 'DNS', `Resolution failed`, {
+        hostname,
+        error: error.message,
+        code: error.code
+      });
+      return { success: false, error: error.message };
     }
+  }
+
+  static async testEndpoint(url, headers = {}, requestId) {
+    const startTime = Date.now();
+    try {
+      Logger.info(requestId, 'NETWORK', `Testing endpoint connectivity`, { url });
+      
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal
+      });
+
+      clearTimeout(timeout);
+      const duration = Date.now() - startTime;
+
+      Logger.info(requestId, 'NETWORK', `Endpoint test completed`, {
+        url,
+        status: response.status,
+        statusText: response.statusText,
+        duration: `${duration}ms`,
+        ok: response.ok
+      });
+
+      return { success: response.ok, status: response.status, duration };
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      Logger.error(requestId, 'NETWORK', `Endpoint test failed`, {
+        url,
+        error: error.message,
+        duration: `${duration}ms`,
+        code: error.code
+      });
+      return { success: false, error: error.message, duration };
+    }
+  }
+}
+
+// Enhanced Overseerr service with comprehensive logging
+class OverseerrService {
+  static async checkAvailability(overseerrUrl, apiKey, mediaType, tmdbId, title, requestId) {
+    const startTime = Date.now();
     
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({
-        id: `org.overmio.addon.${config}`,
-        version: "1.6.0",
-        name: "OverMio Addon",
-        description: "Request movies and shows in Overseerr",
-        resources: ["stream"],
-        types: ["movie", "series"],
-        catalogs: [],
-        idPrefixes: ["tt"]
+    Logger.info(requestId, 'OVERSEERR', `Starting availability check`, {
+      title,
+      tmdbId,
+      mediaType,
+      overseerrUrl: this.sanitizeUrl(overseerrUrl),
+      apiKeyPresent: !!apiKey,
+      apiKeyLength: apiKey?.length || 0
     });
-});
 
-// Configured Video Route
-app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
-    const { config, type, tmdbId } = req.params;
-    const { title, season, episode, request_type } = req.query;
-    const mediaName = title || 'Unknown';
+    try {
+      // Step 1: Network diagnostics
+      const url = new URL(overseerrUrl);
+      const dnsResult = await NetworkDiagnostics.diagnoseHostname(url.hostname, requestId);
+      if (!dnsResult.success) {
+        throw new Error(`DNS resolution failed: ${dnsResult.error}`);
+      }
 
-    console.log(`[VIDEO] Video requested for ${type} ${tmdbId} - ${mediaName}`);
+      // Step 2: Prepare API request
+      const apiUrl = `${overseerrUrl}/api/v1/request?take=10&filter=available`;
+      Logger.debug(requestId, 'OVERSEERR', `Preparing API request`, {
+        apiUrl: this.sanitizeUrl(apiUrl),
+        headers: {
+          'X-Api-Key': apiKey ? `${apiKey.substring(0, 8)}...` : 'missing'
+        }
+      });
 
-    const userConfig = decodeConfig(config);
-    if (!userConfig) {
-        return res.status(400).send('Invalid configuration');
+      // Step 3: Execute request with timeout
+      const controller = new AbortController();
+      const timeout = setTimeout(() => {
+        controller.abort();
+        Logger.error(requestId, 'OVERSEERR', `Request timeout after 15 seconds`);
+      }, 15000);
+
+      const fetchStartTime = Date.now();
+      let response;
+
+      try {
+        response = await fetch(apiUrl, {
+          method: 'GET',
+          headers: {
+            'X-Api-Key': apiKey,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Stremio-Overseerr-Addon/1.0'
+          },
+          signal: controller.signal
+        });
+      } catch (fetchError) {
+        const fetchDuration = Date.now() - fetchStartTime;
+        Logger.error(requestId, 'OVERSEERR', `Fetch failed`, {
+          error: fetchError.message,
+          code: fetchError.code,
+          fetchDuration: `${fetchDuration}ms`
+        });
+        throw fetchError;
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const fetchDuration = Date.now() - fetchStartTime;
+      
+      Logger.debug(requestId, 'OVERSEERR', `Response received`, {
+        status: response.status,
+        statusText: response.statusText,
+        fetchDuration: `${fetchDuration}ms`,
+        headers: Object.fromEntries(response.headers.entries())
+      });
+
+      // Step 4: Process response
+      if (!response.ok) {
+        let errorBody = '';
+        try {
+          errorBody = await response.text();
+          Logger.error(requestId, 'OVERSEERR', `API error response`, {
+            status: response.status,
+            body: errorBody.substring(0, 200)
+          });
+        } catch (textError) {
+          Logger.error(requestId, 'OVERSEERR', `Failed to read error body`, {
+            error: textError.message
+          });
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const totalDuration = Date.now() - startTime;
+
+      const available = data.results?.some(req => req.media?.status === 3) || false;
+      const availableCount = data.results?.filter(req => req.media?.status === 3).length || 0;
+
+      Logger.info(requestId, 'OVERSEERR', `Availability check completed`, {
+        title,
+        tmdbId,
+        available,
+        availableCount,
+        totalRequests: data.results?.length || 0,
+        totalDuration: `${totalDuration}ms`
+      });
+
+      return {
+        available,
+        requests: data.results || [],
+        availableCount,
+        totalCount: data.results?.length || 0
+      };
+
+    } catch (error) {
+      const totalDuration = Date.now() - startTime;
+      Logger.error(requestId, 'OVERSEERR', `Availability check failed`, {
+        title,
+        tmdbId,
+        error: error.message,
+        errorType: error.name,
+        code: error.code,
+        totalDuration: `${totalDuration}ms`
+      });
+      throw error;
     }
+  }
 
-    // Create unique request key
-    let requestKey;
-    if (type === 'movie') {
-        requestKey = `movie-${tmdbId}-${config}`;
-    } else {
-        requestKey = request_type === 'series'
-            ? `series-${tmdbId}-series-${config}`
-            : `series-${tmdbId}-season-${season}-${config}`;
+  static sanitizeUrl(url) {
+    return url.replace(/(api_key=)[^&]+/, '$1***')
+             .replace(/(X-Api-Key=)[^&]+/, '$1***');
+  }
+}
+
+// TMDB Service
+class TMDBService {
+  static async convertImdbToTmdb(imdbId, requestId) {
+    const startTime = Date.now();
+    Logger.info(requestId, 'TMDB', `Converting IMDb to TMDB`, { imdbId });
+
+    try {
+      const url = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+      
+      const response = await fetch(url, { timeout: 10000 });
+      
+      if (!response.ok) {
+        throw new Error(`TMDB API returned ${response.status}`);
+      }
+
+      const data = await response.json();
+      const tmdbId = data.movie_results?.[0]?.id;
+
+      if (!tmdbId) {
+        throw new Error(`No TMDB ID found for IMDb ${imdbId}`);
+      }
+
+      const duration = Date.now() - startTime;
+      Logger.info(requestId, 'TMDB', `Conversion successful`, {
+        imdbId,
+        tmdbId,
+        duration: `${duration}ms`
+      });
+
+      return tmdbId;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      Logger.error(requestId, 'TMDB', `Conversion failed`, {
+        imdbId,
+        error: error.message,
+        duration: `${duration}ms`
+      });
+      throw error;
     }
+  }
 
-    // Trigger Overseerr request in background
-    if (!requestResults.has(requestKey)) {
-        console.log(`[VIDEO] Making background request for ${mediaName}`);
-        requestResults.set(requestKey, { processing: true });
-
-        const seasonNum = season ? parseInt(season) : null;
-        const episodeNum = episode ? parseInt(episode) : null;
-        const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
-
-        makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType, userConfig)
-            .then(result => {
-                console.log(`[BACKGROUND] Request completed for ${mediaName}: ${result.success ? 'SUCCESS' : 'FAILED'}`);
-                requestResults.set(requestKey, result);
-            })
-            .catch(error => {
-                console.error(`[BACKGROUND] Request error for ${mediaName}:`, error.message);
-                requestResults.set(requestKey, { success: false, error: error.message });
-            });
-    }
-
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+  static async getMovieDetails(tmdbId, requestId) {
+    Logger.debug(requestId, 'TMDB', `Fetching movie details`, { tmdbId });
     
-    // Serve video
-    await serveVideo(res, mediaName);
-});
-
-// Configured Stream Endpoint
-app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
-    const { config, type, id } = req.params;
-
-    console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
-
-    const userConfig = decodeConfig(config);
-    if (!userConfig) {
-        return res.status(400).json({ error: 'Invalid configuration' });
+    const url = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`;
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch movie details: ${response.status}`);
     }
 
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    return await response.json();
+  }
+}
 
+// Configuration management
+class ConfigManager {
+  static parseConfiguration(configBase64, requestId) {
     try {
-        const parsedId = parseStremioId(id, type);
-        if (!parsedId) {
-            return res.json({ streams: [] });
-        }
+      Logger.debug(requestId, 'CONFIG', `Parsing configuration`, {
+        configLength: configBase64?.length || 0
+      });
 
-        let tmdbId;
-        let title = `ID: ${id}`;
-        let season = parsedId.season;
-        let episode = parsedId.episode;
+      if (!configBase64) {
+        throw new Error('No configuration provided');
+      }
 
-        if (parsedId.imdbId) {
-            const tmdbResponse = await fetch(
-                `https://api.themoviedb.org/3/find/${parsedId.imdbId}?api_key=${userConfig.tmdbKey}&external_source=imdb_id`
-            );
-            const tmdbData = await tmdbResponse.json();
+      const configJson = base64decode(configBase64);
+      const config = JSON.parse(configJson);
 
-            const result = type === 'movie' ? tmdbData.movie_results?.[0] : tmdbData.tv_results?.[0];
-            if (result) {
-                tmdbId = result.id;
-                title = result.title || result.name;
-                console.log(`[STREAM] Converted IMDb ${parsedId.imdbId} to TMDB ${tmdbId} - ${title}`);
-            } else {
-                return res.json({ streams: [] });
-            }
-        } else if (parsedId.tmdbId) {
-            tmdbId = parsedId.tmdbId;
-        }
+      Logger.info(requestId, 'CONFIG', `Configuration parsed successfully`, {
+        overseerrUrl: config.overseerrUrl,
+        hasApiKey: !!config.overseerrApi,
+        tmdbKeyPresent: !!config.tmdbKey
+      });
 
-        let streams = [];
-
-        if (type === 'movie') {
-            const videoUrl = `${SERVER_URL}/configured/${config}/video/movie/${tmdbId}?title=${encodeURIComponent(title)}`;
-            streams.push({
-                title: `Request Movie (Overseerr)`,
-                url: videoUrl,
-                name: "Overseerr",
-                behaviorHints: {
-                    notWebReady: false,
-                    bingeGroup: `overseerr-${tmdbId}`
-                }
-            });
-        } else if (type === 'series') {
-            if (season !== null) {
-                const seasonUrl = `${SERVER_URL}/configured/${config}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&season=${season}&episode=${episode || 1}&request_type=season`;
-                streams.push({
-                    title: `Request Season ${season} (Overseerr)`,
-                    url: seasonUrl,
-                    name: "Overseerr",
-                    behaviorHints: {
-                        notWebReady: false,
-                        bingeGroup: `overseerr-${tmdbId}-season-${season}`
-                    }
-                });
-
-                const seriesUrl = `${SERVER_URL}/configured/${config}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&season=${season}&episode=${episode || 1}&request_type=series`;
-                streams.push({
-                    title: `Request Full Series (Overseerr)`,
-                    url: seriesUrl,
-                    name: "Overseerr", 
-                    behaviorHints: {
-                        notWebReady: false,
-                        bingeGroup: `overseerr-${tmdbId}-series`
-                    }
-                });
-            } else {
-                const seriesUrl = `${SERVER_URL}/configured/${config}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&request_type=series`;
-                streams.push({
-                    title: `Request Series (Overseerr)`,
-                    url: seriesUrl,
-                    name: "Overseerr",
-                    behaviorHints: {
-                        notWebReady: false,
-                        bingeGroup: `overseerr-${tmdbId}-series`
-                    }
-                });
-            }
-        }
-
-        console.log(`[STREAM] Returning ${streams.length} stream(s) for: ${title}`);
-        res.json({ streams });
-
+      return config;
     } catch (error) {
-        console.error('[STREAM] Error:', error.message);
-        res.json({ streams: [] });
+      Logger.error(requestId, 'CONFIG', `Configuration parsing failed`, {
+        error: error.message
+      });
+      throw error;
     }
+  }
+}
+
+// Stream handler with enhanced logging
+async function handleStreamRequest(id, type, config, requestId) {
+  const startTime = Date.now();
+  
+  Logger.info(requestId, 'STREAM', `Stream request received`, {
+    id,
+    type,
+    config: {
+      overseerrUrl: OverseerrService.sanitizeUrl(config.overseerrUrl),
+      hasApiKey: !!config.overseerrApi
+    }
+  });
+
+  try {
+    // Step 1: Parse ID
+    Logger.debug(requestId, 'STREAM', `Parsing content ID`, { id, type });
+    
+    // Step 2: Convert IMDb to TMDB
+    Logger.info(requestId, 'STREAM', `Converting IMDb to TMDB`, { imdbId: id });
+    const tmdbId = await TMDBService.convertImdbToTmdb(id, requestId);
+
+    // Step 3: Get movie details
+    const movieDetails = await TMDBService.getMovieDetails(tmdbId, requestId);
+    const title = movieDetails.title;
+    
+    Logger.info(requestId, 'STREAM', `Movie details retrieved`, {
+      imdbId: id,
+      tmdbId,
+      title
+    });
+
+    // Step 4: Check Overseerr availability
+    Logger.info(requestId, 'STREAM', `Checking Overseerr availability`, {
+      title,
+      tmdbId
+    });
+
+    const availability = await OverseerrService.checkAvailability(
+      config.overseerrUrl,
+      config.overseerrApi,
+      type,
+      tmdbId,
+      title,
+      requestId
+    );
+
+    // Step 5: Prepare streams
+    const streams = [];
+    if (availability.available) {
+      streams.push({
+        url: `${config.overseerrUrl}/api/v1/media/${tmdbId}`,
+        title: `Watch ${title} (Overseerr)`,
+        name: 'Overseerr'
+      });
+    }
+
+    // Add fallback test stream
+    streams.push({
+      url: `https://stremio-overseerr-addon.vercel.app/video-test`,
+      title: `Test Stream for ${title}`,
+      name: 'Test Stream'
+    });
+
+    const totalDuration = Date.now() - startTime;
+    Logger.info(requestId, 'STREAM', `Stream request completed`, {
+      id,
+      title,
+      tmdbId,
+      streamCount: streams.length,
+      available: availability.available,
+      totalDuration: `${totalDuration}ms`
+    });
+
+    return { streams };
+
+  } catch (error) {
+    const totalDuration = Date.now() - startTime;
+    Logger.error(requestId, 'STREAM', `Stream request failed`, {
+      id,
+      type,
+      error: error.message,
+      totalDuration: `${totalDuration}ms`
+    });
+
+    // Return test stream as fallback
+    return {
+      streams: [{
+        url: `https://stremio-overseerr-addon.vercel.app/video-test`,
+        title: `Test Stream (Fallback)`,
+        name: 'Test Stream'
+      }]
+    };
+  }
+}
+
+// Background request handler
+async function handleBackgroundRequest(movieId, title, config, requestId) {
+  const startTime = Date.now();
+  
+  Logger.info(requestId, 'BACKGROUND', `Background job started`, {
+    movieId,
+    title,
+    config: {
+      overseerrUrl: OverseerrService.sanitizeUrl(config.overseerrUrl),
+      hasApiKey: !!config.overseerrApi
+    }
+  });
+
+  try {
+    // Step 1: Convert IMDb to TMDB
+    Logger.info(requestId, 'BACKGROUND', `Converting IMDb ID`, { movieId });
+    const tmdbId = await TMDBService.convertImdbToTmdb(movieId, requestId);
+
+    // Step 2: Check availability
+    Logger.info(requestId, 'BACKGROUND', `Checking availability`, {
+      title,
+      tmdbId
+    });
+
+    const availability = await OverseerrService.checkAvailability(
+      config.overseerrUrl,
+      config.overseerrApi,
+      'movie',
+      tmdbId,
+      title,
+      requestId
+    );
+
+    const totalDuration = Date.now() - startTime;
+    Logger.info(requestId, 'BACKGROUND', `Background job completed`, {
+      movieId,
+      title,
+      tmdbId,
+      available: availability.available,
+      availableCount: availability.availableCount,
+      totalDuration: `${totalDuration}ms`
+    });
+
+    return {
+      success: true,
+      available: availability.available,
+      tmdbId,
+      availableCount: availability.availableCount
+    };
+
+  } catch (error) {
+    const totalDuration = Date.now() - startTime;
+    Logger.error(requestId, 'BACKGROUND', `Background job failed`, {
+      movieId,
+      title,
+      error: error.message,
+      totalDuration: `${totalDuration}ms`
+    });
+
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// Configuration test endpoint
+async function testConfiguration(overseerrUrl, apiKey, requestId) {
+  const startTime = Date.now();
+  
+  Logger.info(requestId, 'CONFIG_TEST', `Starting configuration test`, {
+    overseerrUrl: OverseerrService.sanitizeUrl(overseerrUrl),
+    apiKeyPresent: !!apiKey
+  });
+
+  try {
+    // Step 1: DNS resolution test
+    const url = new URL(overseerrUrl);
+    const dnsResult = await NetworkDiagnostics.diagnoseHostname(url.hostname, requestId);
+    if (!dnsResult.success) {
+      throw new Error(`DNS resolution failed: ${dnsResult.result.error}`);
+    }
+
+    // Step 2: Endpoint connectivity test
+    const testUrl = `${overseerrUrl}/api/v1/user`;
+    const endpointResult = await NetworkDiagnostics.testEndpoint(
+      testUrl, 
+      { 'X-Api-Key': apiKey }, 
+      requestId
+    );
+
+    if (!endpointResult.success) {
+      throw new Error(`Endpoint test failed: ${endpointResult.error}`);
+    }
+
+    // Step 3: API functionality test
+    const response = await fetch(testUrl, {
+      headers: {
+        'X-Api-Key': apiKey,
+        'Content-Type': 'application/json'
+      },
+      timeout: 15000
+    });
+
+    if (!response.ok) {
+      throw new Error(`API returned ${response.status}: ${response.statusText}`);
+    }
+
+    const userData = await response.json();
+    const totalDuration = Date.now() - startTime;
+
+    Logger.info(requestId, 'CONFIG_TEST', `Configuration test passed`, {
+      user: userData.email,
+      permissions: userData.permissions,
+      totalDuration: `${totalDuration}ms`
+    });
+
+    return {
+      success: true,
+      user: userData.email,
+      permissions: userData.permissions
+    };
+
+  } catch (error) {
+    const totalDuration = Date.now() - startTime;
+    Logger.error(requestId, 'CONFIG_TEST', `Configuration test failed`, {
+      error: error.message,
+      totalDuration: `${totalDuration}ms`
+    });
+
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// Express Routes
+
+// Manifest endpoint
+app.get('/manifest.json', (req, res) => {
+  const requestId = Logger.generateId();
+  Logger.info(requestId, 'MANIFEST', `Manifest requested`);
+  
+  res.json({
+    id: "community.overseerr",
+    version: "1.0.0",
+    name: "Overseerr",
+    description: "Browse and watch content from Overseerr",
+    resources: ["stream"],
+    types: ["movie", "series"],
+    catalogs: []
+  });
 });
 
-// SIMPLE Configuration testing endpoint
-app.post("/api/test-configuration", express.json(), async (req, res) => {
-    try {
-        const { tmdbKey, overseerrUrl, overseerrApi } = req.body;
+// Configured manifest endpoint
+app.get('/configured/:config/manifest.json', (req, res) => {
+  const requestId = Logger.generateId();
+  const config = req.params.config;
+  
+  Logger.info(requestId, 'MANIFEST', `Configured manifest requested`, {
+    configLength: config.length
+  });
 
-        if (!tmdbKey || !overseerrUrl || !overseerrApi) {
-            return res.json({ success: false, error: 'Missing required fields' });
-        }
+  try {
+    const configData = ConfigManager.parseConfiguration(config, requestId);
+    
+    Logger.info(requestId, 'MANIFEST', `Sending configured manifest`, {
+      overseerrUrl: OverseerrService.sanitizeUrl(configData.overseerrUrl)
+    });
 
-        const results = [];
+    res.json({
+      id: "community.overseerr",
+      version: "1.0.0",
+      name: `Overseerr (${new URL(configData.overseerrUrl).hostname})`,
+      description: `Overseerr integration for ${configData.overseerrUrl}`,
+      resources: ["stream"],
+      types: ["movie", "series"],
+      catalogs: []
+    });
 
-        // Test TMDB API
-        try {
-            const tmdbResponse = await fetch(`https://api.themoviedb.org/3/movie/550?api_key=${tmdbKey}`);
-            if (tmdbResponse.ok) {
-                results.push({ service: 'TMDB', status: 'success', message: 'API key is valid' });
-            } else {
-                results.push({ service: 'TMDB', status: 'error', message: `API key invalid (HTTP ${tmdbResponse.status})` });
-            }
-        } catch (error) {
-            results.push({ service: 'TMDB', status: 'error', message: `Connection failed: ${error.message}` });
-        }
-
-        // Test Overseerr API - SIMPLE, no complex decoding
-        try {
-            let normalizedUrl = overseerrUrl;
-            if (!normalizedUrl.startsWith('http')) {
-                normalizedUrl = 'https://' + normalizedUrl;
-            }
-            normalizedUrl = normalizedUrl.replace(/\/$/, '');
-            
-            console.log(`[TEST] Testing Overseerr with URL: ${normalizedUrl}`);
-            
-            const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
-                headers: { 'X-Api-Key': overseerrApi } // Use API key AS-IS
-            });
-            
-            if (overseerrResponse.ok) {
-                results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
-            } else if (overseerrResponse.status === 401) {
-                results.push({ service: 'Overseerr', status: 'error', message: 'Unauthorized (401) - Invalid API key' });
-            } else if (overseerrResponse.status === 403) {
-                results.push({ service: 'Overseerr', status: 'error', message: 'Forbidden (403) - API key rejected' });
-            } else {
-                results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
-            }
-        } catch (error) {
-            if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
-                results.push({ service: 'Overseerr', status: 'error', message: 'DNS resolution failed' });
-            } else {
-                results.push({ service: 'Overseerr', status: 'error', message: `Connection failed: ${error.message}` });
-            }
-        }
-
-        const allSuccess = results.every(result => result.status === 'success');
-        
-        res.json({
-            success: allSuccess,
-            results: results
-        });
-
-    } catch (error) {
-        res.json({
-            success: false,
-            error: `Server error: ${error.message}`
-        });
-    }
+  } catch (error) {
+    Logger.error(requestId, 'MANIFEST', `Configured manifest failed`, {
+      error: error.message
+    });
+    res.status(400).json({ error: error.message });
+  }
 });
 
-// Home page
-app.get("/", (req, res) => {
-    const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Stremio Overseerr Addon</title>
-        <style>
-            body { font-family: sans-serif; background: #111; color: #eee; padding: 30px; max-width: 800px; margin: 0 auto; }
-            h1 { color: #8ef; }
-            a { color: #9f9; }
-            .container { background: #1a1a1a; padding: 20px; border-radius: 8px; margin: 20px 0; }
-            .btn { background: #28a745; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; display: inline-block; margin: 5px; }
-        </style>
-    </head>
-    <body>
-        <h1>🎬 Stremio Overseerr Addon</h1>
-        <p>Server running: ${SERVER_URL}</p>
-        
-        <div class="container">
-            <h2>🔧 Configuration</h2>
-            <p>Use the configuration page to generate your personal addon URL with your own API keys:</p>
-            <a href="/config" class="btn">Open Configuration Page</a>
-        </div>
+// Stream endpoint
+app.get('/configured/:config/stream/:type/:id.json', async (req, res) => {
+  const requestId = Logger.generateId();
+  const { config, type, id } = req.params;
 
-        <div class="container">
-            <h2>🎥 Video Test</h2>
-            <p>Test if the video playback works (critical for Stremio):</p>
-            <a href="/video-test" class="btn">Test Video Playback</a>
-        </div>
-    </body>
-    </html>
-    `;
-    res.send(html);
+  try {
+    Logger.info(requestId, 'STREAM', `Stream request started`, { type, id });
+    
+    const configData = ConfigManager.parseConfiguration(config, requestId);
+    const result = await handleStreamRequest(id, type, configData, requestId);
+    
+    res.json(result);
+
+  } catch (error) {
+    Logger.error(requestId, 'STREAM', `Stream endpoint failed`, {
+      type,
+      id,
+      error: error.message
+    });
+    
+    res.json({ streams: [] });
+  }
+});
+
+// Configuration test endpoint
+app.post('/api/test-configuration', async (req, res) => {
+  const requestId = Logger.generateId();
+  const { overseerrUrl, apiKey } = req.body;
+
+  Logger.info(requestId, 'CONFIG_TEST', `Configuration test requested`, {
+    overseerrUrl: OverseerrService.sanitizeUrl(overseerrUrl),
+    apiKeyPresent: !!apiKey
+  });
+
+  try {
+    const result = await testConfiguration(overseerrUrl, apiKey, requestId);
+    res.json(result);
+  } catch (error) {
+    Logger.error(requestId, 'CONFIG_TEST', `Configuration test endpoint failed`, {
+      error: error.message
+    });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Background request endpoint
+app.post('/api/background-request', async (req, res) => {
+  const requestId = Logger.generateId();
+  const { movieId, title, config } = req.body;
+
+  Logger.info(requestId, 'BACKGROUND', `Background request received`, {
+    movieId,
+    title
+  });
+
+  try {
+    const result = await handleBackgroundRequest(movieId, title, config, requestId);
+    res.json(result);
+  } catch (error) {
+    Logger.error(requestId, 'BACKGROUND', `Background request endpoint failed`, {
+      error: error.message
+    });
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Video test endpoint
-app.get("/video-test", async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
-    
-    console.log(`[VIDEO TEST] Video test requested`);
-    await serveVideo(res, "Test Video");
-});
+app.get('/video-test', (req, res) => {
+  const requestId = Logger.generateId();
+  const range = req.headers.range;
+  
+  Logger.info(requestId, 'VIDEO', `Video test requested`, { range });
 
-// Configuration page
-app.get("/config", (req, res) => {
-    const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Configure Stremio Overseerr Addon</title>
-        <style>
-            body { font-family: sans-serif; background: #111; color: #eee; padding: 30px; max-width: 800px; margin: 0 auto; }
-            .container { background: #1a1a1a; padding: 20px; border-radius: 8px; margin: 20px 0; }
-            input { width: 100%; padding: 10px; margin: 5px 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; }
-            button { background: #28a745; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
-            .btn-test { background: #17a2b8; }
-            .btn-install { background: #ff6b35; }
-            .addon-url { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; font-family: monospace; word-break: break-all; }
-            .test-result { margin: 10px 0; padding: 10px; border-radius: 4px; }
-            .test-success { background: #155724; color: #d4edda; }
-            .test-error { background: #721c24; color: #f8d7da; }
-        </style>
-    </head>
-    <body>
-        <h1>⚙️ Configure Stremio Overseerr Addon</h1>
-        
-        <div class="container">
-            <form id="configForm">
-                <h3>TMDB API Key *</h3>
-                <input type="text" id="tmdbKey" placeholder="Your TMDB API Key" required>
-                <small>Get from: https://www.themoviedb.org/settings/api</small>
-                
-                <h3>Overseerr URL *</h3>
-                <input type="text" id="overseerrUrl" placeholder="https://overseerr.example.com" required>
-                <small>Your Overseerr instance URL</small>
-                
-                <h3>Overseerr API Key *</h3>
-                <input type="text" id="overseerrApi" placeholder="Your Overseerr API Key" required>
-                <small>Get from Overseerr: Settings → API Keys</small>
-                
-                <button type="button" onclick="generateAddon()">Generate Addon URL</button>
-                <button type="button" onclick="testConfiguration()" class="btn-test">Test Configuration</button>
-            </form>
-        </div>
-
-        <div id="result" style="display: none;" class="container">
-            <h3>📦 Your Addon URL</h3>
-            <div class="addon-url" id="addonUrl"></div>
-            
-            <div style="margin: 15px 0;">
-                <button onclick="installInStremio()" class="btn-install">🚀 Install in Stremio (Auto)</button>
-                <p><small>This will automatically open Stremio and install the addon</small></p>
-            </div>
-            
-            <p><strong>Manual Installation:</strong></p>
-            <ol>
-                <li>Open Stremio</li>
-                <li>Click the puzzle piece icon (Addons)</li>
-                <li>Click "Community Addons"</li>
-                <li>Paste the URL above and click "Install"</li>
-            </ol>
-            
-            <a href="/video-test" target="_blank" class="btn-test">Test Video Playback</a>
-        </div>
-
-        <div id="testResults" class="container"></div>
-
-        <script>
-            let currentAddonUrl = '';
-
-            async function testConfiguration() {
-                const config = {
-                    tmdbKey: document.getElementById('tmdbKey').value,
-                    overseerrUrl: document.getElementById('overseerrUrl').value,
-                    overseerrApi: document.getElementById('overseerrApi').value
-                };
-
-                if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
-                    document.getElementById('testResults').innerHTML = '<div class="test-error">Please fill in all fields</div>';
-                    return;
-                }
-
-                document.getElementById('testResults').innerHTML = '<div class="test-result">Testing configuration...</div>';
-
-                try {
-                    const response = await fetch('/api/test-configuration', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(config)
-                    });
-
-                    const result = await response.json();
-                    
-                    let html = '';
-                    if (result.success) {
-                        html += '<div class="test-success">✅ All tests passed! Your configuration is working correctly.</div>';
-                    } else {
-                        html += '<div class="test-error">❌ Some tests failed. Please check your configuration.</div>';
-                    }
-                    
-                    result.results.forEach(test => {
-                        const className = test.status === 'success' ? 'test-success' : 'test-error';
-                        html += '<div class="test-result ' + className + '">' + (test.status === 'success' ? '✅' : '❌') + ' <strong>' + test.service + ':</strong> ' + test.message + '</div>';
-                    });
-                    
-                    document.getElementById('testResults').innerHTML = html;
-                    
-                } catch (error) {
-                    document.getElementById('testResults').innerHTML = '<div class="test-error">Test failed: ' + error.message + '</div>';
-                }
-            }
-
-            function generateAddon() {
-                const config = {
-                    tmdbKey: document.getElementById('tmdbKey').value,
-                    overseerrUrl: document.getElementById('overseerrUrl').value,
-                    overseerrApi: document.getElementById('overseerrApi').value
-                };
-
-                if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
-                    alert('Please fill in all required fields');
-                    return;
-                }
-
-                const configJson = JSON.stringify(config);
-                const configBase64 = btoa(unescape(encodeURIComponent(configJson)));
-                
-                currentAddonUrl = window.location.origin + '/configured/' + configBase64 + '/manifest.json';
-                
-                document.getElementById('addonUrl').textContent = currentAddonUrl;
-                document.getElementById('result').style.display = 'block';
-                document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
-            }
-
-            function installInStremio() {
-                if (!currentAddonUrl) {
-                    alert('Please generate an addon URL first');
-                    return;
-                }
-
-                const stremioUrl = 'stremio://' + currentAddonUrl.replace(/^https?:\\/\\//, '');
-                window.location.href = stremioUrl;
-                
-                setTimeout(() => {
-                    if (!document.hidden) {
-                        alert('Stremio not detected. Please make sure Stremio is installed and running, or manually copy the addon URL.');
-                    }
-                }, 1000);
-            }
-        </script>
-    </body>
-    </html>
-    `;
-    res.send(html);
-});
-
-// Health check
-app.get("/health", (req, res) => {
-    res.json({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        server: 'Stremio Overseerr Addon',
-        url: SERVER_URL,
-        deployment: process.env.VERCEL ? 'Vercel' : 'Docker/Local'
+  // Simple video streaming for testing
+  if (range) {
+    Logger.debug(requestId, 'VIDEO', `Range request processed`, { range });
+    res.writeHead(206, {
+      'Content-Type': 'video/mp4',
+      'Accept-Ranges': 'bytes'
     });
+    res.end();
+  } else {
+    Logger.debug(requestId, 'VIDEO', `Full video request`);
+    res.json({ message: "Video test endpoint" });
+  }
 });
 
-// Handle CORS
-app.options('*', (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
-    res.sendStatus(200);
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
+  });
+});
+
+// Diagnostic endpoint
+app.get('/diagnose', async (req, res) => {
+  const requestId = Logger.generateId();
+  const { url } = req.query;
+  
+  Logger.info(requestId, 'DIAGNOSE', `Diagnostic request`, { url });
+
+  try {
+    if (!url) {
+      return res.status(400).json({ error: 'URL parameter required' });
+    }
+
+    const dnsResult = await NetworkDiagnostics.diagnoseHostname(new URL(url).hostname, requestId);
+    const endpointResult = await NetworkDiagnostics.testEndpoint(url, {}, requestId);
+
+    res.json({
+      dns: dnsResult,
+      endpoint: endpointResult,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    Logger.error(requestId, 'DIAGNOSE', `Diagnostic failed`, { error: error.message });
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Stremio Overseerr Addon running at: ${SERVER_URL}`);
-    console.log(`🔧 Configuration page: ${SERVER_URL}/config`);
-    console.log(`🎥 Video test: ${SERVER_URL}/video-test`);
-    console.log(`❤️  Health check: ${SERVER_URL}/health`);
-    console.log(`🚀 Deployment: ${process.env.VERCEL ? 'Vercel' : 'Docker/Local'}`);
-    
-    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
-    if (fs.existsSync(localVideoPath)) {
-        const stats = fs.statSync(localVideoPath);
-        console.log(`🎥 Local video found: ${(stats.size / (1024 * 1024)).toFixed(2)} MB`);
-    } else {
-        console.log(`🎥 Local video not found, using GitHub redirect`);
-    }
+app.listen(PORT, () => {
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    level: 'INFO',
+    component: 'SERVER',
+    message: `Stremio Overseerr addon started on port ${PORT}`,
+    nodeVersion: process.version,
+    environment: process.env.NODE_ENV || 'development'
+  }));
 });
 
-export default app;
+module.exports = app;
