@@ -15,7 +15,7 @@ const SERVER_URL = process.env.VERCEL_URL
 // Store request results
 const requestResults = new Map();
 
-// Improved video serving function - works for both Docker and Vercel
+// Improved video serving function
 async function serveVideo(res, mediaName) {
     console.log(`[VIDEO] Serving video for ${mediaName}`);
     
@@ -64,6 +64,39 @@ async function serveVideo(res, mediaName) {
     console.log(`[VIDEO] Local video not found, redirecting to GitHub`);
     res.redirect('https://github.com/ericvlog/stremio-overseerr-addon/raw/refs/heads/main/wait.mp4');
     return true;
+}
+
+// Function to properly decode Overseerr API key (handle double encoding)
+function decodeOverseerrApi(encodedApiKey) {
+    try {
+        // Try to decode multiple times in case of double encoding
+        let decoded = encodedApiKey;
+        let previous = '';
+        
+        while (decoded !== previous) {
+            previous = decoded;
+            try {
+                // Try to decode as base64
+                const buffer = Buffer.from(decoded, 'base64');
+                const potentialDecode = buffer.toString('utf8');
+                
+                // Check if it looks like a valid API key (alphanumeric, no special chars except maybe -_)
+                if (/^[a-zA-Z0-9\-_]+$/.test(potentialDecode)) {
+                    decoded = potentialDecode;
+                } else {
+                    break;
+                }
+            } catch (e) {
+                break;
+            }
+        }
+        
+        console.log(`[API KEY] Decoded from ${encodedApiKey.substring(0, 10)}... to ${decoded.substring(0, 10)}...`);
+        return decoded;
+    } catch (error) {
+        console.error(`[API KEY] Error decoding: ${error.message}`);
+        return encodedApiKey; // Return original if decoding fails
+    }
 }
 
 // Improved Overseerr request with better error handling
@@ -117,19 +150,21 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
         }
         overseerrUrl = overseerrUrl.replace(/\/$/, ''); // Remove trailing slash
 
+        // Decode the API key properly
+        const decodedApiKey = decodeOverseerrApi(userConfig.overseerrApi);
+
         console.log(`[REQUEST] Making request to: ${overseerrUrl}/api/v1/request`);
+        console.log(`[REQUEST] Using API key: ${decodedApiKey.substring(0, 10)}...`);
 
         const response = await fetch(
             `${overseerrUrl}/api/v1/request`,
             {
                 method: 'POST',
                 headers: {
-                    'X-Api-Key': userConfig.overseerrApi,
+                    'X-Api-Key': decodedApiKey,
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify(requestBody),
-                // Add timeout for DNS issues
-                timeout: 10000
+                body: JSON.stringify(requestBody)
             }
         );
 
@@ -139,10 +174,21 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
             return { success: true, data: data };
         } else {
             const errorText = await response.text();
-            console.error('[REQUEST] Failed:', errorText);
+            console.error(`[REQUEST] Failed: HTTP ${response.status} - ${errorText}`);
+            
+            let userError = `HTTP ${response.status}`;
+            if (response.status === 401) {
+                userError = `Unauthorized (401) - Check your Overseerr API key`;
+            } else if (response.status === 404) {
+                userError = `Not Found (404) - Check your Overseerr URL`;
+            } else if (response.status >= 500) {
+                userError = `Server Error (${response.status}) - Overseerr server issue`;
+            }
+            
             return {
                 success: false,
-                error: `HTTP ${response.status}: ${errorText}`
+                error: userError,
+                details: errorText
             };
         }
     } catch (error) {
@@ -151,7 +197,9 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
         // Handle DNS errors specifically
         let userFriendlyError = error.message;
         if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
-            userFriendlyError = `DNS resolution failed for ${userConfig.overseerrUrl}. Please use IP address instead of hostname in Docker.`;
+            userFriendlyError = `DNS resolution failed for ${userConfig.overseerrUrl}. Please use IP address instead of hostname.`;
+        } else if (error.message.includes('fetch failed')) {
+            userFriendlyError = `Network error - cannot reach ${userConfig.overseerrUrl}`;
         }
         
         return {
@@ -281,6 +329,9 @@ app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
         makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType, userConfig)
             .then(result => {
                 console.log(`[BACKGROUND] Request completed for ${mediaName}: ${result.success ? 'SUCCESS' : 'FAILED'}`);
+                if (!result.success) {
+                    console.log(`[BACKGROUND] Error details: ${result.error}`);
+                }
                 requestResults.set(requestKey, result);
             })
             .catch(error => {
@@ -400,7 +451,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// Configuration testing endpoint with DNS testing
+// Configuration testing endpoint with improved API key handling
 app.post("/api/test-configuration", express.json(), async (req, res) => {
     try {
         const { tmdbKey, overseerrUrl, overseerrApi } = req.body;
@@ -423,7 +474,7 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             results.push({ service: 'TMDB', status: 'error', message: `Connection failed: ${error.message}` });
         }
 
-        // Test Overseerr API with DNS check
+        // Test Overseerr API with DNS check and proper API key decoding
         try {
             let normalizedUrl = overseerrUrl;
             if (!normalizedUrl.startsWith('http')) {
@@ -431,19 +482,27 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             }
             normalizedUrl = normalizedUrl.replace(/\/$/, '');
             
+            // Decode the API key properly
+            const decodedApiKey = decodeOverseerrApi(overseerrApi);
+            
+            console.log(`[TEST] Testing Overseerr with URL: ${normalizedUrl}, API key: ${decodedApiKey.substring(0, 10)}...`);
+            
             const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
-                headers: { 'X-Api-Key': overseerrApi },
-                timeout: 5000
+                headers: { 'X-Api-Key': decodedApiKey }
             });
             
             if (overseerrResponse.ok) {
                 results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
+            } else if (overseerrResponse.status === 401) {
+                results.push({ service: 'Overseerr', status: 'error', message: 'Unauthorized (401) - Invalid API key' });
             } else {
                 results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
             }
         } catch (error) {
             if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
-                results.push({ service: 'Overseerr', status: 'error', message: `DNS resolution failed. Try using IP address instead of hostname in Docker.` });
+                results.push({ service: 'Overseerr', status: 'error', message: `DNS resolution failed. Try using IP address instead of hostname.` });
+            } else if (error.message.includes('fetch failed')) {
+                results.push({ service: 'Overseerr', status: 'error', message: `Network error - cannot reach the URL` });
             } else {
                 results.push({ service: 'Overseerr', status: 'error', message: `Connection failed: ${error.message}` });
             }
@@ -478,11 +537,16 @@ app.get("/", (req, res) => {
             .container { background: #1a1a1a; padding: 20px; border-radius: 8px; margin: 20px 0; }
             .btn { background: #28a745; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; display: inline-block; margin: 5px; }
             .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <h1>🎬 Stremio Overseerr Addon</h1>
         <p>Server running: ${SERVER_URL}</p>
+        
+        <div class="info">
+            <strong>🔧 Configuration Issue Detected:</strong> Your Overseerr API key appears to be double-encoded. The new version will automatically fix this.
+        </div>
         
         <div class="warning">
             <strong>⚠️ Docker Users:</strong> If you get DNS errors, use your server's IP address instead of hostname in the Overseerr URL field.
@@ -518,7 +582,7 @@ app.get("/video-test", async (req, res) => {
     await serveVideo(res, "Test Video");
 });
 
-// Configuration page - UPDATED with Install in Stremio button
+// Configuration page - UPDATED with API key fix instructions
 app.get("/config", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -538,10 +602,15 @@ app.get("/config", (req, res) => {
             .test-error { background: #721c24; color: #f8d7da; }
             .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .success { background: #155724; color: #d4edda; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <h1>⚙️ Configure Stremio Overseerr Addon</h1>
+        
+        <div class="info">
+            <strong>🔄 API Key Fix Applied:</strong> The system now automatically handles double-encoded API keys. If you had issues before, try generating a new addon URL.
+        </div>
         
         <div class="warning">
             <strong>Docker Users:</strong> If you experience DNS issues, use your server's IP address (e.g., http://192.168.1.100:5055) instead of a hostname for the Overseerr URL.
@@ -563,7 +632,8 @@ app.get("/config", (req, res) => {
                 
                 <h3>Overseerr API Key *</h3>
                 <input type="text" id="overseerrApi" placeholder="Your Overseerr API Key" required>
-                <small>Get from Overseerr: Settings → API Keys</small>
+                <small>Get from Overseerr: Settings → API Keys → Generate New API Key</small>
+                <small style="color: #8ef;">⚠️ Make sure to use the raw API key, not a base64 encoded version</small>
                 
                 <button type="button" onclick="generateAddon()">Generate Addon URL</button>
                 <button type="button" onclick="testConfiguration()" class="btn-test">Test Configuration</button>
@@ -609,7 +679,7 @@ app.get("/config", (req, res) => {
                     return;
                 }
 
-                document.getElementById('testResults').innerHTML = 'Testing configuration...';
+                document.getElementById('testResults').innerHTML = '<div class="test-result">Testing configuration... (this may take a few seconds)</div>';
 
                 try {
                     const response = await fetch('/api/test-configuration', {
