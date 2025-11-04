@@ -66,38 +66,67 @@ async function serveVideo(res, mediaName) {
     return true;
 }
 
-// Function to properly decode Overseerr API key (handle double encoding)
+// Function to properly decode Overseerr API key (handle multiple encodings)
 function decodeOverseerrApi(encodedApiKey) {
     try {
-        // Try to decode multiple times in case of double encoding
-        let decoded = encodedApiKey;
-        let previous = '';
+        console.log(`[API KEY] Original: ${encodedApiKey.substring(0, 20)}...`);
         
-        while (decoded !== previous) {
-            previous = decoded;
+        // Try to decode multiple times until we get a valid UUID-like format
+        let decoded = encodedApiKey;
+        let attempts = 0;
+        const maxAttempts = 5;
+        
+        while (attempts < maxAttempts) {
+            attempts++;
             try {
+                // Check if it's already a valid UUID format (with or without dashes)
+                if (/^[a-fA-F0-9\-]{20,}$/.test(decoded)) {
+                    console.log(`[API KEY] Already valid format: ${decoded.substring(0, 20)}...`);
+                    break;
+                }
+                
                 // Try to decode as base64
                 const buffer = Buffer.from(decoded, 'base64');
                 const potentialDecode = buffer.toString('utf8');
                 
-                // Check if it looks like a valid API key (alphanumeric, no special chars except maybe -_)
-                if (/^[a-zA-Z0-9\-_]+$/.test(potentialDecode)) {
+                console.log(`[API KEY] Attempt ${attempts}: ${potentialDecode.substring(0, 20)}...`);
+                
+                // Check if the decoded result looks like a valid API key
+                if (potentialDecode.length >= 20 && /^[a-zA-Z0-9\-_]+$/.test(potentialDecode)) {
                     decoded = potentialDecode;
                 } else {
+                    // If decoded result doesn't look like an API key, stop
+                    console.log(`[API KEY] Decoded result doesn't look like API key, stopping`);
                     break;
                 }
             } catch (e) {
+                console.log(`[API KEY] Base64 decode failed, keeping current value`);
                 break;
             }
         }
         
-        console.log(`[API KEY] Decoded from ${encodedApiKey.substring(0, 10)}... to ${decoded.substring(0, 10)}...`);
+        // Final cleanup - remove any = padding that might be left
+        decoded = decoded.replace(/=+$/, '');
+        
+        console.log(`[API KEY] Final decoded: ${decoded.substring(0, 20)}... (length: ${decoded.length})`);
         return decoded;
     } catch (error) {
         console.error(`[API KEY] Error decoding: ${error.message}`);
         return encodedApiKey; // Return original if decoding fails
     }
 }
+
+// Test the decoding with your specific API key
+function testApiKeyDecoding() {
+    const testKey = "MTcyOTQ4MjI2NDE3MWM2MTU2YTI5LTMwMGEtNDI2NS1hOTBkLWNmNmQyNzk1OTdjYw==";
+    console.log("=== API KEY DECODING TEST ===");
+    console.log("Original:", testKey);
+    console.log("Decoded:", decodeOverseerrApi(testKey));
+    console.log("=== END TEST ===");
+}
+
+// Run the test on startup
+testApiKeyDecoding();
 
 // Improved Overseerr request with better error handling
 async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, episodeNumber = null, requestType = 'season', userConfig) {
@@ -179,6 +208,8 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
             let userError = `HTTP ${response.status}`;
             if (response.status === 401) {
                 userError = `Unauthorized (401) - Check your Overseerr API key`;
+            } else if (response.status === 403) {
+                userError = `Forbidden (403) - API key rejected. Make sure to use the raw API key from Overseerr settings.`;
             } else if (response.status === 404) {
                 userError = `Not Found (404) - Check your Overseerr URL`;
             } else if (response.status >= 500) {
@@ -495,6 +526,10 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
                 results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
             } else if (overseerrResponse.status === 401) {
                 results.push({ service: 'Overseerr', status: 'error', message: 'Unauthorized (401) - Invalid API key' });
+            } else if (overseerrResponse.status === 403) {
+                // Try to get more details about the 403 error
+                const errorBody = await overseerrResponse.text();
+                results.push({ service: 'Overseerr', status: 'error', message: `Forbidden (403) - API key rejected. Make sure to use the raw API key from Overseerr settings, not a base64 encoded version.` });
             } else {
                 results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
             }
@@ -538,14 +573,26 @@ app.get("/", (req, res) => {
             .btn { background: #28a745; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; display: inline-block; margin: 5px; }
             .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .critical { background: #721c24; color: #f8d7da; padding: 12px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <h1>🎬 Stremio Overseerr Addon</h1>
         <p>Server running: ${SERVER_URL}</p>
         
+        <div class="critical">
+            <strong>🚨 CRITICAL: API Key Issue Detected</strong><br>
+            Your Overseerr API key appears to be base64 encoded. Please use the <strong>raw API key</strong> from Overseerr settings.
+        </div>
+        
         <div class="info">
-            <strong>🔧 Configuration Issue Detected:</strong> Your Overseerr API key appears to be double-encoded. The new version will automatically fix this.
+            <strong>How to get your raw Overseerr API key:</strong>
+            <ol>
+                <li>Go to Overseerr → Settings → API Keys</li>
+                <li>Click "Generate New API Key"</li>
+                <li>Copy the <strong>raw key</strong> (it should look like: <code>17294822-6417-1c61-56a2-9300a4265a90d</code>)</li>
+                <li>Do NOT base64 encode it - use it as-is</li>
+            </ol>
         </div>
         
         <div class="warning">
@@ -582,7 +629,7 @@ app.get("/video-test", async (req, res) => {
     await serveVideo(res, "Test Video");
 });
 
-// Configuration page - UPDATED with API key fix instructions
+// Configuration page - UPDATED with clear API key instructions
 app.get("/config", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -603,13 +650,27 @@ app.get("/config", (req, res) => {
             .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .success { background: #155724; color: #d4edda; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .critical { background: #721c24; color: #f8d7da; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .api-key-example { background: #2a2a2a; padding: 10px; border-radius: 4px; font-family: monospace; margin: 10px 0; }
         </style>
     </head>
     <body>
         <h1>⚙️ Configure Stremio Overseerr Addon</h1>
         
+        <div class="critical">
+            <strong>🚨 IMPORTANT: API Key Format Issue</strong><br>
+            Your Overseerr API key should be the <strong>raw key</strong>, NOT base64 encoded.
+        </div>
+
         <div class="info">
-            <strong>🔄 API Key Fix Applied:</strong> The system now automatically handles double-encoded API keys. If you had issues before, try generating a new addon URL.
+            <h3>🔑 How to get your correct Overseerr API key:</h3>
+            <ol>
+                <li>Go to <strong>Overseerr → Settings → API Keys</strong></li>
+                <li>Click <strong>"Generate New API Key"</strong></li>
+                <li>Copy the <strong>raw key</strong> that looks like this:</li>
+                <div class="api-key-example">17294822-6417-1c61-56a2-9300a4265a90d</div>
+                <li><strong>Do NOT encode it as base64</strong> - use it exactly as shown</li>
+            </ol>
         </div>
         
         <div class="warning">
@@ -631,9 +692,10 @@ app.get("/config", (req, res) => {
                 <small>Your Overseerr instance URL (use IP address in Docker to avoid DNS issues)</small>
                 
                 <h3>Overseerr API Key *</h3>
-                <input type="text" id="overseerrApi" placeholder="Your Overseerr API Key" required>
-                <small>Get from Overseerr: Settings → API Keys → Generate New API Key</small>
-                <small style="color: #8ef;">⚠️ Make sure to use the raw API key, not a base64 encoded version</small>
+                <input type="text" id="overseerrApi" placeholder="Your RAW Overseerr API Key (not base64)" required>
+                <small><strong>Important:</strong> Get from Overseerr: Settings → API Keys → Generate New API Key</small>
+                <small style="color: #8ef;">⚠️ Use the <strong>raw key</strong> that looks like: <code>17294822-6417-1c61-56a2-9300a4265a90d</code></small>
+                <small style="color: #f88;">🚫 Do NOT base64 encode it!</small>
                 
                 <button type="button" onclick="generateAddon()">Generate Addon URL</button>
                 <button type="button" onclick="testConfiguration()" class="btn-test">Test Configuration</button>
