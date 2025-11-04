@@ -1,7 +1,5 @@
 const express = require('express');
 const fetch = require('node-fetch');
-const { base64encode, base64decode } = require('base64url');
-const dns = require('dns').promises;
 
 const app = express();
 app.use(express.json());
@@ -10,555 +8,233 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const TMDB_API_KEY = 'b9ec03e24520c344670f7a67d5e8c5f9';
 
-// Enhanced logging utility
-class Logger {
-  static generateId() {
-    return Math.random().toString(36).substring(2, 10);
-  }
-
-  static log(level, requestId, component, message, data = {}) {
-    const timestamp = new Date().toISOString();
-    const logEntry = {
-      timestamp,
-      level,
-      requestId,
-      component,
-      message,
-      ...data
-    };
-    console.log(JSON.stringify(logEntry));
-  }
-
-  static info(requestId, component, message, data = {}) {
-    this.log('INFO', requestId, component, message, data);
-  }
-
-  static error(requestId, component, message, data = {}) {
-    this.log('ERROR', requestId, component, message, data);
-  }
-
-  static warn(requestId, component, message, data = {}) {
-    this.log('WARN', requestId, component, message, data);
-  }
-
-  static debug(requestId, component, message, data = {}) {
-    this.log('DEBUG', requestId, component, message, data);
-  }
+// Simple logging
+function log(level, message, data = {}) {
+  const timestamp = new Date().toISOString();
+  console.log(JSON.stringify({
+    timestamp,
+    level,
+    message,
+    ...data
+  }));
 }
 
-// Enhanced network diagnostics
-class NetworkDiagnostics {
-  static async diagnoseHostname(hostname, requestId) {
-    try {
-      Logger.info(requestId, 'DNS', `Resolving hostname: ${hostname}`);
-      const addresses = await dns.resolve4(hostname);
-      Logger.info(requestId, 'DNS', `Resolved successfully`, { addresses });
-      return { success: true, addresses };
-    } catch (error) {
-      Logger.error(requestId, 'DNS', `Resolution failed`, {
-        hostname,
-        error: error.message,
-        code: error.code
-      });
-      return { success: false, error: error.message };
+// Basic configuration parsing
+function parseConfiguration(configBase64) {
+  try {
+    if (!configBase64) {
+      throw new Error('No configuration provided');
     }
-  }
-
-  static async testEndpoint(url, headers = {}, requestId) {
-    const startTime = Date.now();
-    try {
-      Logger.info(requestId, 'NETWORK', `Testing endpoint connectivity`, { url });
-      
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers,
-        signal: controller.signal
-      });
-
-      clearTimeout(timeout);
-      const duration = Date.now() - startTime;
-
-      Logger.info(requestId, 'NETWORK', `Endpoint test completed`, {
-        url,
-        status: response.status,
-        statusText: response.statusText,
-        duration: `${duration}ms`,
-        ok: response.ok
-      });
-
-      return { success: response.ok, status: response.status, duration };
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      Logger.error(requestId, 'NETWORK', `Endpoint test failed`, {
-        url,
-        error: error.message,
-        duration: `${duration}ms`,
-        code: error.code
-      });
-      return { success: false, error: error.message, duration };
-    }
-  }
-}
-
-// Enhanced Overseerr service with comprehensive logging
-class OverseerrService {
-  static async checkAvailability(overseerrUrl, apiKey, mediaType, tmdbId, title, requestId) {
-    const startTime = Date.now();
     
-    Logger.info(requestId, 'OVERSEERR', `Starting availability check`, {
-      title,
-      tmdbId,
-      mediaType,
-      overseerrUrl: this.sanitizeUrl(overseerrUrl),
-      apiKeyPresent: !!apiKey,
-      apiKeyLength: apiKey?.length || 0
+    // Simple base64 decoding
+    const configJson = Buffer.from(configBase64, 'base64').toString('utf8');
+    const config = JSON.parse(configJson);
+    
+    log('INFO', 'Configuration parsed', {
+      overseerrUrl: config.overseerrUrl,
+      hasApiKey: !!config.overseerrApi
     });
-
-    try {
-      // Step 1: Network diagnostics
-      const url = new URL(overseerrUrl);
-      const dnsResult = await NetworkDiagnostics.diagnoseHostname(url.hostname, requestId);
-      if (!dnsResult.success) {
-        throw new Error(`DNS resolution failed: ${dnsResult.error}`);
-      }
-
-      // Step 2: Prepare API request
-      const apiUrl = `${overseerrUrl}/api/v1/request?take=10&filter=available`;
-      Logger.debug(requestId, 'OVERSEERR', `Preparing API request`, {
-        apiUrl: this.sanitizeUrl(apiUrl),
-        headers: {
-          'X-Api-Key': apiKey ? `${apiKey.substring(0, 8)}...` : 'missing'
-        }
-      });
-
-      // Step 3: Execute request with timeout
-      const controller = new AbortController();
-      const timeout = setTimeout(() => {
-        controller.abort();
-        Logger.error(requestId, 'OVERSEERR', `Request timeout after 15 seconds`);
-      }, 15000);
-
-      const fetchStartTime = Date.now();
-      let response;
-
-      try {
-        response = await fetch(apiUrl, {
-          method: 'GET',
-          headers: {
-            'X-Api-Key': apiKey,
-            'Content-Type': 'application/json',
-            'User-Agent': 'Stremio-Overseerr-Addon/1.0'
-          },
-          signal: controller.signal
-        });
-      } catch (fetchError) {
-        const fetchDuration = Date.now() - fetchStartTime;
-        Logger.error(requestId, 'OVERSEERR', `Fetch failed`, {
-          error: fetchError.message,
-          code: fetchError.code,
-          fetchDuration: `${fetchDuration}ms`
-        });
-        throw fetchError;
-      } finally {
-        clearTimeout(timeout);
-      }
-
-      const fetchDuration = Date.now() - fetchStartTime;
-      
-      Logger.debug(requestId, 'OVERSEERR', `Response received`, {
-        status: response.status,
-        statusText: response.statusText,
-        fetchDuration: `${fetchDuration}ms`,
-        headers: Object.fromEntries(response.headers.entries())
-      });
-
-      // Step 4: Process response
-      if (!response.ok) {
-        let errorBody = '';
-        try {
-          errorBody = await response.text();
-          Logger.error(requestId, 'OVERSEERR', `API error response`, {
-            status: response.status,
-            body: errorBody.substring(0, 200)
-          });
-        } catch (textError) {
-          Logger.error(requestId, 'OVERSEERR', `Failed to read error body`, {
-            error: textError.message
-          });
-        }
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      const totalDuration = Date.now() - startTime;
-
-      const available = data.results?.some(req => req.media?.status === 3) || false;
-      const availableCount = data.results?.filter(req => req.media?.status === 3).length || 0;
-
-      Logger.info(requestId, 'OVERSEERR', `Availability check completed`, {
-        title,
-        tmdbId,
-        available,
-        availableCount,
-        totalRequests: data.results?.length || 0,
-        totalDuration: `${totalDuration}ms`
-      });
-
-      return {
-        available,
-        requests: data.results || [],
-        availableCount,
-        totalCount: data.results?.length || 0
-      };
-
-    } catch (error) {
-      const totalDuration = Date.now() - startTime;
-      Logger.error(requestId, 'OVERSEERR', `Availability check failed`, {
-        title,
-        tmdbId,
-        error: error.message,
-        errorType: error.name,
-        code: error.code,
-        totalDuration: `${totalDuration}ms`
-      });
-      throw error;
-    }
-  }
-
-  static sanitizeUrl(url) {
-    return url.replace(/(api_key=)[^&]+/, '$1***')
-             .replace(/(X-Api-Key=)[^&]+/, '$1***');
-  }
-}
-
-// TMDB Service
-class TMDBService {
-  static async convertImdbToTmdb(imdbId, requestId) {
-    const startTime = Date.now();
-    Logger.info(requestId, 'TMDB', `Converting IMDb to TMDB`, { imdbId });
-
-    try {
-      const url = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
-      
-      const response = await fetch(url, { timeout: 10000 });
-      
-      if (!response.ok) {
-        throw new Error(`TMDB API returned ${response.status}`);
-      }
-
-      const data = await response.json();
-      const tmdbId = data.movie_results?.[0]?.id;
-
-      if (!tmdbId) {
-        throw new Error(`No TMDB ID found for IMDb ${imdbId}`);
-      }
-
-      const duration = Date.now() - startTime;
-      Logger.info(requestId, 'TMDB', `Conversion successful`, {
-        imdbId,
-        tmdbId,
-        duration: `${duration}ms`
-      });
-
-      return tmdbId;
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      Logger.error(requestId, 'TMDB', `Conversion failed`, {
-        imdbId,
-        error: error.message,
-        duration: `${duration}ms`
-      });
-      throw error;
-    }
-  }
-
-  static async getMovieDetails(tmdbId, requestId) {
-    Logger.debug(requestId, 'TMDB', `Fetching movie details`, { tmdbId });
     
-    const url = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`;
-    const response = await fetch(url);
-    
-    if (!response.ok) {
-      throw new Error(`Failed to fetch movie details: ${response.status}`);
-    }
-
-    return await response.json();
+    return config;
+  } catch (error) {
+    log('ERROR', 'Configuration parsing failed', { error: error.message });
+    throw error;
   }
 }
 
-// Configuration management
-class ConfigManager {
-  static parseConfiguration(configBase64, requestId) {
-    try {
-      Logger.debug(requestId, 'CONFIG', `Parsing configuration`, {
-        configLength: configBase64?.length || 0
-      });
-
-      if (!configBase64) {
-        throw new Error('No configuration provided');
-      }
-
-      const configJson = base64decode(configBase64);
-      const config = JSON.parse(configJson);
-
-      Logger.info(requestId, 'CONFIG', `Configuration parsed successfully`, {
-        overseerrUrl: config.overseerrUrl,
-        hasApiKey: !!config.overseerrApi,
-        tmdbKeyPresent: !!config.tmdbKey
-      });
-
-      return config;
-    } catch (error) {
-      Logger.error(requestId, 'CONFIG', `Configuration parsing failed`, {
-        error: error.message
-      });
-      throw error;
-    }
+// Convert IMDb to TMDB
+async function convertImdbToTmdb(imdbId) {
+  log('INFO', 'Converting IMDb to TMDB', { imdbId });
+  
+  const url = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+  const response = await fetch(url);
+  
+  if (!response.ok) {
+    throw new Error(`TMDB API returned ${response.status}`);
   }
+  
+  const data = await response.json();
+  const tmdbId = data.movie_results?.[0]?.id;
+  
+  if (!tmdbId) {
+    throw new Error(`No TMDB ID found for IMDb ${imdbId}`);
+  }
+  
+  log('INFO', 'Conversion successful', { imdbId, tmdbId });
+  return tmdbId;
 }
 
-// Stream handler with enhanced logging
-async function handleStreamRequest(id, type, config, requestId) {
+// Check Overseerr availability
+async function checkOverseerrAvailability(overseerrUrl, apiKey, tmdbId, title) {
   const startTime = Date.now();
   
-  Logger.info(requestId, 'STREAM', `Stream request received`, {
-    id,
-    type,
-    config: {
-      overseerrUrl: OverseerrService.sanitizeUrl(config.overseerrUrl),
-      hasApiKey: !!config.overseerrApi
-    }
+  log('INFO', 'Checking Overseerr availability', {
+    title,
+    tmdbId,
+    overseerrUrl
   });
-
+  
   try {
-    // Step 1: Parse ID
-    Logger.debug(requestId, 'STREAM', `Parsing content ID`, { id, type });
+    const apiUrl = `${overseerrUrl}/api/v1/request?take=10&filter=available`;
     
-    // Step 2: Convert IMDb to TMDB
-    Logger.info(requestId, 'STREAM', `Converting IMDb to TMDB`, { imdbId: id });
-    const tmdbId = await TMDBService.convertImdbToTmdb(id, requestId);
-
-    // Step 3: Get movie details
-    const movieDetails = await TMDBService.getMovieDetails(tmdbId, requestId);
-    const title = movieDetails.title;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
     
-    Logger.info(requestId, 'STREAM', `Movie details retrieved`, {
-      imdbId: id,
-      tmdbId,
-      title
+    const response = await fetch(apiUrl, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        'Content-Type': 'application/json'
+      },
+      signal: controller.signal
     });
-
-    // Step 4: Check Overseerr availability
-    Logger.info(requestId, 'STREAM', `Checking Overseerr availability`, {
+    
+    clearTimeout(timeout);
+    
+    if (!response.ok) {
+      throw new Error(`Overseerr API returned ${response.status}`);
+    }
+    
+    const data = await response.json();
+    const available = data.results?.some(req => req.media?.status === 3) || false;
+    const duration = Date.now() - startTime;
+    
+    log('INFO', 'Availability check completed', {
       title,
-      tmdbId
+      tmdbId,
+      available,
+      duration: `${duration}ms`
     });
+    
+    return { available, requests: data.results || [] };
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    log('ERROR', 'Availability check failed', {
+      title,
+      tmdbId,
+      error: error.message,
+      duration: `${duration}ms`
+    });
+    throw error;
+  }
+}
 
-    const availability = await OverseerrService.checkAvailability(
+// Test configuration
+async function testConfiguration(overseerrUrl, apiKey) {
+  const startTime = Date.now();
+  
+  log('INFO', 'Testing configuration', { overseerrUrl });
+  
+  try {
+    const testUrl = `${overseerrUrl}/api/v1/user`;
+    const response = await fetch(testUrl, {
+      headers: {
+        'X-Api-Key': apiKey,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`API returned ${response.status}`);
+    }
+    
+    const userData = await response.json();
+    const duration = Date.now() - startTime;
+    
+    log('INFO', 'Configuration test passed', {
+      user: userData.email,
+      duration: `${duration}ms`
+    });
+    
+    return { success: true, user: userData.email };
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    log('ERROR', 'Configuration test failed', {
+      error: error.message,
+      duration: `${duration}ms`
+    });
+    return { success: false, error: error.message };
+  }
+}
+
+// Stream handler
+async function handleStreamRequest(id, type, config) {
+  const startTime = Date.now();
+  
+  log('INFO', 'Stream request received', { id, type });
+  
+  try {
+    // Convert IMDb to TMDB
+    const tmdbId = await convertImdbToTmdb(id);
+    
+    // Get movie title (optional)
+    const movieUrl = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`;
+    const movieResponse = await fetch(movieUrl);
+    const movieData = await movieResponse.json();
+    const title = movieData.title || 'Unknown';
+    
+    // Check availability
+    const availability = await checkOverseerrAvailability(
       config.overseerrUrl,
       config.overseerrApi,
-      type,
       tmdbId,
-      title,
-      requestId
+      title
     );
-
-    // Step 5: Prepare streams
+    
+    // Prepare streams
     const streams = [];
+    
     if (availability.available) {
       streams.push({
-        url: `${config.overseerrUrl}/api/v1/media/${tmdbId}`,
-        title: `Watch ${title} (Overseerr)`,
+        url: `https://stremio-overseerr-addon.vercel.app/video-test`,
+        title: `Watch ${title}`,
         name: 'Overseerr'
       });
     }
-
-    // Add fallback test stream
+    
+    // Always include test stream
     streams.push({
       url: `https://stremio-overseerr-addon.vercel.app/video-test`,
       title: `Test Stream for ${title}`,
       name: 'Test Stream'
     });
-
-    const totalDuration = Date.now() - startTime;
-    Logger.info(requestId, 'STREAM', `Stream request completed`, {
+    
+    const duration = Date.now() - startTime;
+    log('INFO', 'Stream request completed', {
       id,
       title,
-      tmdbId,
       streamCount: streams.length,
-      available: availability.available,
-      totalDuration: `${totalDuration}ms`
+      duration: `${duration}ms`
     });
-
+    
     return { streams };
-
+    
   } catch (error) {
-    const totalDuration = Date.now() - startTime;
-    Logger.error(requestId, 'STREAM', `Stream request failed`, {
+    const duration = Date.now() - startTime;
+    log('ERROR', 'Stream request failed', {
       id,
-      type,
       error: error.message,
-      totalDuration: `${totalDuration}ms`
+      duration: `${duration}ms`
     });
-
-    // Return test stream as fallback
+    
+    // Return fallback stream
     return {
       streams: [{
         url: `https://stremio-overseerr-addon.vercel.app/video-test`,
-        title: `Test Stream (Fallback)`,
+        title: 'Test Stream (Fallback)',
         name: 'Test Stream'
       }]
     };
   }
 }
 
-// Background request handler
-async function handleBackgroundRequest(movieId, title, config, requestId) {
-  const startTime = Date.now();
-  
-  Logger.info(requestId, 'BACKGROUND', `Background job started`, {
-    movieId,
-    title,
-    config: {
-      overseerrUrl: OverseerrService.sanitizeUrl(config.overseerrUrl),
-      hasApiKey: !!config.overseerrApi
-    }
-  });
+// Routes
 
-  try {
-    // Step 1: Convert IMDb to TMDB
-    Logger.info(requestId, 'BACKGROUND', `Converting IMDb ID`, { movieId });
-    const tmdbId = await TMDBService.convertImdbToTmdb(movieId, requestId);
-
-    // Step 2: Check availability
-    Logger.info(requestId, 'BACKGROUND', `Checking availability`, {
-      title,
-      tmdbId
-    });
-
-    const availability = await OverseerrService.checkAvailability(
-      config.overseerrUrl,
-      config.overseerrApi,
-      'movie',
-      tmdbId,
-      title,
-      requestId
-    );
-
-    const totalDuration = Date.now() - startTime;
-    Logger.info(requestId, 'BACKGROUND', `Background job completed`, {
-      movieId,
-      title,
-      tmdbId,
-      available: availability.available,
-      availableCount: availability.availableCount,
-      totalDuration: `${totalDuration}ms`
-    });
-
-    return {
-      success: true,
-      available: availability.available,
-      tmdbId,
-      availableCount: availability.availableCount
-    };
-
-  } catch (error) {
-    const totalDuration = Date.now() - startTime;
-    Logger.error(requestId, 'BACKGROUND', `Background job failed`, {
-      movieId,
-      title,
-      error: error.message,
-      totalDuration: `${totalDuration}ms`
-    });
-
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
-
-// Configuration test endpoint
-async function testConfiguration(overseerrUrl, apiKey, requestId) {
-  const startTime = Date.now();
-  
-  Logger.info(requestId, 'CONFIG_TEST', `Starting configuration test`, {
-    overseerrUrl: OverseerrService.sanitizeUrl(overseerrUrl),
-    apiKeyPresent: !!apiKey
-  });
-
-  try {
-    // Step 1: DNS resolution test
-    const url = new URL(overseerrUrl);
-    const dnsResult = await NetworkDiagnostics.diagnoseHostname(url.hostname, requestId);
-    if (!dnsResult.success) {
-      throw new Error(`DNS resolution failed: ${dnsResult.result.error}`);
-    }
-
-    // Step 2: Endpoint connectivity test
-    const testUrl = `${overseerrUrl}/api/v1/user`;
-    const endpointResult = await NetworkDiagnostics.testEndpoint(
-      testUrl, 
-      { 'X-Api-Key': apiKey }, 
-      requestId
-    );
-
-    if (!endpointResult.success) {
-      throw new Error(`Endpoint test failed: ${endpointResult.error}`);
-    }
-
-    // Step 3: API functionality test
-    const response = await fetch(testUrl, {
-      headers: {
-        'X-Api-Key': apiKey,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
-    });
-
-    if (!response.ok) {
-      throw new Error(`API returned ${response.status}: ${response.statusText}`);
-    }
-
-    const userData = await response.json();
-    const totalDuration = Date.now() - startTime;
-
-    Logger.info(requestId, 'CONFIG_TEST', `Configuration test passed`, {
-      user: userData.email,
-      permissions: userData.permissions,
-      totalDuration: `${totalDuration}ms`
-    });
-
-    return {
-      success: true,
-      user: userData.email,
-      permissions: userData.permissions
-    };
-
-  } catch (error) {
-    const totalDuration = Date.now() - startTime;
-    Logger.error(requestId, 'CONFIG_TEST', `Configuration test failed`, {
-      error: error.message,
-      totalDuration: `${totalDuration}ms`
-    });
-
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
-
-// Express Routes
-
-// Manifest endpoint
+// Manifest
 app.get('/manifest.json', (req, res) => {
-  const requestId = Logger.generateId();
-  Logger.info(requestId, 'MANIFEST', `Manifest requested`);
-  
+  log('INFO', 'Manifest requested');
   res.json({
     id: "community.overseerr",
     version: "1.0.0",
@@ -570,173 +246,107 @@ app.get('/manifest.json', (req, res) => {
   });
 });
 
-// Configured manifest endpoint
+// Configured manifest
 app.get('/configured/:config/manifest.json', (req, res) => {
-  const requestId = Logger.generateId();
   const config = req.params.config;
   
-  Logger.info(requestId, 'MANIFEST', `Configured manifest requested`, {
-    configLength: config.length
-  });
-
   try {
-    const configData = ConfigManager.parseConfiguration(config, requestId);
+    const configData = parseConfiguration(config);
     
-    Logger.info(requestId, 'MANIFEST', `Sending configured manifest`, {
-      overseerrUrl: OverseerrService.sanitizeUrl(configData.overseerrUrl)
+    log('INFO', 'Configured manifest sent', {
+      overseerrUrl: configData.overseerrUrl
     });
-
+    
     res.json({
       id: "community.overseerr",
       version: "1.0.0",
       name: `Overseerr (${new URL(configData.overseerrUrl).hostname})`,
-      description: `Overseerr integration for ${configData.overseerrUrl}`,
+      description: `Overseerr integration`,
       resources: ["stream"],
       types: ["movie", "series"],
       catalogs: []
     });
-
+    
   } catch (error) {
-    Logger.error(requestId, 'MANIFEST', `Configured manifest failed`, {
-      error: error.message
-    });
+    log('ERROR', 'Configured manifest failed', { error: error.message });
     res.status(400).json({ error: error.message });
   }
 });
 
 // Stream endpoint
 app.get('/configured/:config/stream/:type/:id.json', async (req, res) => {
-  const requestId = Logger.generateId();
   const { config, type, id } = req.params;
-
+  
   try {
-    Logger.info(requestId, 'STREAM', `Stream request started`, { type, id });
-    
-    const configData = ConfigManager.parseConfiguration(config, requestId);
-    const result = await handleStreamRequest(id, type, configData, requestId);
-    
+    const configData = parseConfiguration(config);
+    const result = await handleStreamRequest(id, type, configData);
     res.json(result);
-
   } catch (error) {
-    Logger.error(requestId, 'STREAM', `Stream endpoint failed`, {
-      type,
-      id,
-      error: error.message
-    });
-    
+    log('ERROR', 'Stream endpoint failed', { id, error: error.message });
     res.json({ streams: [] });
   }
 });
 
-// Configuration test endpoint
+// Configuration test
 app.post('/api/test-configuration', async (req, res) => {
-  const requestId = Logger.generateId();
   const { overseerrUrl, apiKey } = req.body;
-
-  Logger.info(requestId, 'CONFIG_TEST', `Configuration test requested`, {
-    overseerrUrl: OverseerrService.sanitizeUrl(overseerrUrl),
-    apiKeyPresent: !!apiKey
-  });
-
+  
+  log('INFO', 'Configuration test requested', { overseerrUrl });
+  
   try {
-    const result = await testConfiguration(overseerrUrl, apiKey, requestId);
+    const result = await testConfiguration(overseerrUrl, apiKey);
     res.json(result);
   } catch (error) {
-    Logger.error(requestId, 'CONFIG_TEST', `Configuration test endpoint failed`, {
-      error: error.message
-    });
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Background request endpoint
-app.post('/api/background-request', async (req, res) => {
-  const requestId = Logger.generateId();
-  const { movieId, title, config } = req.body;
-
-  Logger.info(requestId, 'BACKGROUND', `Background request received`, {
-    movieId,
-    title
-  });
-
-  try {
-    const result = await handleBackgroundRequest(movieId, title, config, requestId);
-    res.json(result);
-  } catch (error) {
-    Logger.error(requestId, 'BACKGROUND', `Background request endpoint failed`, {
-      error: error.message
-    });
+    log('ERROR', 'Configuration test endpoint failed', { error: error.message });
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // Video test endpoint
 app.get('/video-test', (req, res) => {
-  const requestId = Logger.generateId();
-  const range = req.headers.range;
+  log('INFO', 'Video test requested');
   
-  Logger.info(requestId, 'VIDEO', `Video test requested`, { range });
-
-  // Simple video streaming for testing
-  if (range) {
-    Logger.debug(requestId, 'VIDEO', `Range request processed`, { range });
-    res.writeHead(206, {
-      'Content-Type': 'video/mp4',
-      'Accept-Ranges': 'bytes'
-    });
-    res.end();
-  } else {
-    Logger.debug(requestId, 'VIDEO', `Full video request`);
-    res.json({ message: "Video test endpoint" });
-  }
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
+  // Simple response for testing
   res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    version: '1.0.0'
+    message: "Video test endpoint - Streaming would work here",
+    status: "ok"
   });
 });
 
-// Diagnostic endpoint
-app.get('/diagnose', async (req, res) => {
-  const requestId = Logger.generateId();
-  const { url } = req.query;
-  
-  Logger.info(requestId, 'DIAGNOSE', `Diagnostic request`, { url });
-
-  try {
-    if (!url) {
-      return res.status(400).json({ error: 'URL parameter required' });
-    }
-
-    const dnsResult = await NetworkDiagnostics.diagnoseHostname(new URL(url).hostname, requestId);
-    const endpointResult = await NetworkDiagnostics.testEndpoint(url, {}, requestId);
-
-    res.json({
-      dns: dnsResult,
-      endpoint: endpointResult,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    Logger.error(requestId, 'DIAGNOSE', `Diagnostic failed`, { error: error.message });
-    res.status(500).json({ error: error.message });
-  }
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(JSON.stringify({
-    timestamp: new Date().toISOString(),
-    level: 'INFO',
-    component: 'SERVER',
-    message: `Stremio Overseerr addon started on port ${PORT}`,
-    nodeVersion: process.version,
-    environment: process.env.NODE_ENV || 'development'
-  }));
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Stremio Overseerr Addon',
+    status: 'running',
+    timestamp: new Date().toISOString()
+  });
 });
 
+// Error handling middleware
+app.use((error, req, res, next) => {
+  log('ERROR', 'Unhandled error', { error: error.message });
+  res.status(500).json({ error: 'Internal Server Error' });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found' });
+});
+
+// Start server only if not in Vercel
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    log('INFO', `Server started on port ${PORT}`);
+  });
+}
+
+// Export for Vercel
 module.exports = app;
