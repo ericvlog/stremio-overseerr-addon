@@ -66,69 +66,39 @@ async function serveVideo(res, mediaName) {
     return true;
 }
 
-// Function to properly decode Overseerr API key (handle multiple encodings)
+// Function to properly decode Overseerr API key
 function decodeOverseerrApi(encodedApiKey) {
     try {
         console.log(`[API KEY] Original: ${encodedApiKey.substring(0, 20)}...`);
         
-        // Try to decode multiple times until we get a valid UUID-like format
-        let decoded = encodedApiKey;
-        let attempts = 0;
-        const maxAttempts = 5;
-        
-        while (attempts < maxAttempts) {
-            attempts++;
-            try {
-                // Check if it's already a valid UUID format (with or without dashes)
-                if (/^[a-fA-F0-9\-]{20,}$/.test(decoded)) {
-                    console.log(`[API KEY] Already valid format: ${decoded.substring(0, 20)}...`);
-                    break;
-                }
-                
-                // Try to decode as base64
-                const buffer = Buffer.from(decoded, 'base64');
-                const potentialDecode = buffer.toString('utf8');
-                
-                console.log(`[API KEY] Attempt ${attempts}: ${potentialDecode.substring(0, 20)}...`);
-                
-                // Check if the decoded result looks like a valid API key
-                if (potentialDecode.length >= 20 && /^[a-zA-Z0-9\-_]+$/.test(potentialDecode)) {
-                    decoded = potentialDecode;
-                } else {
-                    // If decoded result doesn't look like an API key, stop
-                    console.log(`[API KEY] Decoded result doesn't look like API key, stopping`);
-                    break;
-                }
-            } catch (e) {
-                console.log(`[API KEY] Base64 decode failed, keeping current value`);
-                break;
-            }
+        // If it's already a UUID format (with dashes), return as-is
+        if (/^[a-fA-F0-9\-]{20,}$/.test(encodedApiKey)) {
+            console.log(`[API KEY] Already valid UUID format`);
+            return encodedApiKey;
         }
         
-        // Final cleanup - remove any = padding that might be left
-        decoded = decoded.replace(/=+$/, '');
+        // Try to decode as base64
+        try {
+            const buffer = Buffer.from(encodedApiKey, 'base64');
+            const decoded = buffer.toString('utf8');
+            
+            // Check if decoded result looks like a valid API key
+            if (decoded.length >= 20 && /^[a-zA-Z0-9\-_]+$/.test(decoded)) {
+                console.log(`[API KEY] Successfully decoded from base64: ${decoded.substring(0, 20)}...`);
+                return decoded;
+            }
+        } catch (e) {
+            console.log(`[API KEY] Base64 decode failed, using original`);
+        }
         
-        console.log(`[API KEY] Final decoded: ${decoded.substring(0, 20)}... (length: ${decoded.length})`);
-        return decoded;
+        return encodedApiKey;
     } catch (error) {
         console.error(`[API KEY] Error decoding: ${error.message}`);
-        return encodedApiKey; // Return original if decoding fails
+        return encodedApiKey;
     }
 }
 
-// Test the decoding with your specific API key
-function testApiKeyDecoding() {
-    const testKey = "MTcyOTQ4MjI2NDE3MWM2MTU2YTI5LTMwMGEtNDI2NS1hOTBkLWNmNmQyNzk1OTdjYw==";
-    console.log("=== API KEY DECODING TEST ===");
-    console.log("Original:", testKey);
-    console.log("Decoded:", decodeOverseerrApi(testKey));
-    console.log("=== END TEST ===");
-}
-
-// Run the test on startup
-testApiKeyDecoding();
-
-// Improved Overseerr request with better error handling
+// Improved Overseerr request with Vercel-specific fixes
 async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, episodeNumber = null, requestType = 'season', userConfig) {
     try {
         let requestDescription = mediaName;
@@ -177,7 +147,7 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
         if (!overseerrUrl.startsWith('http')) {
             overseerrUrl = 'https://' + overseerrUrl;
         }
-        overseerrUrl = overseerrUrl.replace(/\/$/, ''); // Remove trailing slash
+        overseerrUrl = overseerrUrl.replace(/\/$/, '');
 
         // Decode the API key properly
         const decodedApiKey = decodeOverseerrApi(userConfig.overseerrApi);
@@ -185,52 +155,66 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
         console.log(`[REQUEST] Making request to: ${overseerrUrl}/api/v1/request`);
         console.log(`[REQUEST] Using API key: ${decodedApiKey.substring(0, 10)}...`);
 
-        const response = await fetch(
-            `${overseerrUrl}/api/v1/request`,
-            {
-                method: 'POST',
-                headers: {
-                    'X-Api-Key': decodedApiKey,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(requestBody)
-            }
-        );
+        // Vercel-specific: Add proper headers and timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
-        if (response.ok) {
-            const data = await response.json();
-            console.log(`[REQUEST] Success for: ${requestDescription}`);
-            return { success: true, data: data };
-        } else {
-            const errorText = await response.text();
-            console.error(`[REQUEST] Failed: HTTP ${response.status} - ${errorText}`);
-            
-            let userError = `HTTP ${response.status}`;
-            if (response.status === 401) {
-                userError = `Unauthorized (401) - Check your Overseerr API key`;
-            } else if (response.status === 403) {
-                userError = `Forbidden (403) - API key rejected. Make sure to use the raw API key from Overseerr settings.`;
-            } else if (response.status === 404) {
-                userError = `Not Found (404) - Check your Overseerr URL`;
-            } else if (response.status >= 500) {
-                userError = `Server Error (${response.status}) - Overseerr server issue`;
+        try {
+            const response = await fetch(
+                `${overseerrUrl}/api/v1/request`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': decodedApiKey,
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'Stremio-Overseerr-Addon/1.0.0'
+                    },
+                    body: JSON.stringify(requestBody),
+                    signal: controller.signal
+                }
+            );
+
+            clearTimeout(timeoutId);
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log(`[REQUEST] Success for: ${requestDescription}`);
+                return { success: true, data: data };
+            } else {
+                const errorText = await response.text();
+                console.error(`[REQUEST] Failed: HTTP ${response.status} - ${errorText}`);
+                
+                let userError = `HTTP ${response.status}`;
+                if (response.status === 401) {
+                    userError = `Unauthorized (401) - Invalid API key`;
+                } else if (response.status === 403) {
+                    userError = `Forbidden (403) - API key rejected`;
+                } else if (response.status === 404) {
+                    userError = `Not Found (404) - Check Overseerr URL`;
+                } else if (response.status >= 500) {
+                    userError = `Overseerr Server Error (${response.status})`;
+                }
+                
+                return {
+                    success: false,
+                    error: userError,
+                    details: errorText
+                };
             }
-            
-            return {
-                success: false,
-                error: userError,
-                details: errorText
-            };
+        } catch (fetchError) {
+            clearTimeout(timeoutId);
+            throw fetchError;
         }
     } catch (error) {
         console.error('[REQUEST] Failed:', error.message);
         
-        // Handle DNS errors specifically
         let userFriendlyError = error.message;
-        if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
-            userFriendlyError = `DNS resolution failed for ${userConfig.overseerrUrl}. Please use IP address instead of hostname.`;
+        if (error.name === 'AbortError') {
+            userFriendlyError = `Request timeout - Overseerr server took too long to respond`;
+        } else if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
+            userFriendlyError = `DNS resolution failed - cannot reach ${userConfig.overseerrUrl}`;
         } else if (error.message.includes('fetch failed')) {
-            userFriendlyError = `Network error - cannot reach ${userConfig.overseerrUrl}`;
+            userFriendlyError = `Network error - cannot connect to Overseerr`;
         }
         
         return {
@@ -325,7 +309,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// Configured Video Route - FIXED for both Docker and Vercel
+// Configured Video Route
 app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
     const { config, type, tmdbId } = req.params;
     const { title, season, episode, request_type } = req.query;
@@ -361,7 +345,7 @@ app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
             .then(result => {
                 console.log(`[BACKGROUND] Request completed for ${mediaName}: ${result.success ? 'SUCCESS' : 'FAILED'}`);
                 if (!result.success) {
-                    console.log(`[BACKGROUND] Error details: ${result.error}`);
+                    console.log(`[BACKGROUND] Error: ${result.error}`);
                 }
                 requestResults.set(requestKey, result);
             })
@@ -376,7 +360,7 @@ app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
     
-    // Serve video (works for both Docker and Vercel)
+    // Serve video
     await serveVideo(res, mediaName);
 });
 
@@ -482,7 +466,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// Configuration testing endpoint with improved API key handling
+// Configuration testing endpoint
 app.post("/api/test-configuration", express.json(), async (req, res) => {
     try {
         const { tmdbKey, overseerrUrl, overseerrApi } = req.body;
@@ -505,7 +489,7 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             results.push({ service: 'TMDB', status: 'error', message: `Connection failed: ${error.message}` });
         }
 
-        // Test Overseerr API with DNS check and proper API key decoding
+        // Test Overseerr API
         try {
             let normalizedUrl = overseerrUrl;
             if (!normalizedUrl.startsWith('http')) {
@@ -513,31 +497,36 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             }
             normalizedUrl = normalizedUrl.replace(/\/$/, '');
             
-            // Decode the API key properly
             const decodedApiKey = decodeOverseerrApi(overseerrApi);
             
             console.log(`[TEST] Testing Overseerr with URL: ${normalizedUrl}, API key: ${decodedApiKey.substring(0, 10)}...`);
             
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+
             const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
-                headers: { 'X-Api-Key': decodedApiKey }
+                headers: { 'X-Api-Key': decodedApiKey },
+                signal: controller.signal
             });
+
+            clearTimeout(timeoutId);
             
             if (overseerrResponse.ok) {
                 results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
             } else if (overseerrResponse.status === 401) {
                 results.push({ service: 'Overseerr', status: 'error', message: 'Unauthorized (401) - Invalid API key' });
             } else if (overseerrResponse.status === 403) {
-                // Try to get more details about the 403 error
-                const errorBody = await overseerrResponse.text();
-                results.push({ service: 'Overseerr', status: 'error', message: `Forbidden (403) - API key rejected. Make sure to use the raw API key from Overseerr settings, not a base64 encoded version.` });
+                results.push({ service: 'Overseerr', status: 'error', message: 'Forbidden (403) - API key rejected' });
             } else {
                 results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
             }
         } catch (error) {
-            if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
-                results.push({ service: 'Overseerr', status: 'error', message: `DNS resolution failed. Try using IP address instead of hostname.` });
+            if (error.name === 'AbortError') {
+                results.push({ service: 'Overseerr', status: 'error', message: 'Connection timeout - Overseerr server not responding' });
+            } else if (error.code === 'EAI_AGAIN' || error.message.includes('getaddrinfo')) {
+                results.push({ service: 'Overseerr', status: 'error', message: 'DNS resolution failed - cannot reach the URL' });
             } else if (error.message.includes('fetch failed')) {
-                results.push({ service: 'Overseerr', status: 'error', message: `Network error - cannot reach the URL` });
+                results.push({ service: 'Overseerr', status: 'error', message: 'Network error - cannot connect to Overseerr' });
             } else {
                 results.push({ service: 'Overseerr', status: 'error', message: `Connection failed: ${error.message}` });
             }
@@ -571,32 +560,15 @@ app.get("/", (req, res) => {
             a { color: #9f9; }
             .container { background: #1a1a1a; padding: 20px; border-radius: 8px; margin: 20px 0; }
             .btn { background: #28a745; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; display: inline-block; margin: 5px; }
-            .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
-            .critical { background: #721c24; color: #f8d7da; padding: 12px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <h1>🎬 Stremio Overseerr Addon</h1>
         <p>Server running: ${SERVER_URL}</p>
         
-        <div class="critical">
-            <strong>🚨 CRITICAL: API Key Issue Detected</strong><br>
-            Your Overseerr API key appears to be base64 encoded. Please use the <strong>raw API key</strong> from Overseerr settings.
-        </div>
-        
         <div class="info">
-            <strong>How to get your raw Overseerr API key:</strong>
-            <ol>
-                <li>Go to Overseerr → Settings → API Keys</li>
-                <li>Click "Generate New API Key"</li>
-                <li>Copy the <strong>raw key</strong> (it should look like: <code>17294822-6417-1c61-56a2-9300a4265a90d</code>)</li>
-                <li>Do NOT base64 encode it - use it as-is</li>
-            </ol>
-        </div>
-        
-        <div class="warning">
-            <strong>⚠️ Docker Users:</strong> If you get DNS errors, use your server's IP address instead of hostname in the Overseerr URL field.
+            <strong>✅ Auto-API Key Decoding:</strong> The system automatically handles base64 encoded API keys. Users can paste either format.
         </div>
         
         <div class="container">
@@ -618,18 +590,15 @@ app.get("/", (req, res) => {
 
 // Video test endpoint
 app.get("/video-test", async (req, res) => {
-    // Set CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
     
     console.log(`[VIDEO TEST] Video test requested`);
-    
-    // Serve video using the unified function
     await serveVideo(res, "Test Video");
 });
 
-// Configuration page - UPDATED with clear API key instructions
+// Configuration page
 app.get("/config", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -647,38 +616,14 @@ app.get("/config", (req, res) => {
             .test-result { margin: 10px 0; padding: 10px; border-radius: 4px; }
             .test-success { background: #155724; color: #d4edda; }
             .test-error { background: #721c24; color: #f8d7da; }
-            .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
-            .success { background: #155724; color: #d4edda; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .info { background: #0c5460; color: #d1ecf1; padding: 12px; border-radius: 6px; margin: 15px 0; }
-            .critical { background: #721c24; color: #f8d7da; padding: 12px; border-radius: 6px; margin: 15px 0; }
-            .api-key-example { background: #2a2a2a; padding: 10px; border-radius: 4px; font-family: monospace; margin: 10px 0; }
         </style>
     </head>
     <body>
         <h1>⚙️ Configure Stremio Overseerr Addon</h1>
         
-        <div class="critical">
-            <strong>🚨 IMPORTANT: API Key Format Issue</strong><br>
-            Your Overseerr API key should be the <strong>raw key</strong>, NOT base64 encoded.
-        </div>
-
         <div class="info">
-            <h3>🔑 How to get your correct Overseerr API key:</h3>
-            <ol>
-                <li>Go to <strong>Overseerr → Settings → API Keys</strong></li>
-                <li>Click <strong>"Generate New API Key"</strong></li>
-                <li>Copy the <strong>raw key</strong> that looks like this:</li>
-                <div class="api-key-example">17294822-6417-1c61-56a2-9300a4265a90d</div>
-                <li><strong>Do NOT encode it as base64</strong> - use it exactly as shown</li>
-            </ol>
-        </div>
-        
-        <div class="warning">
-            <strong>Docker Users:</strong> If you experience DNS issues, use your server's IP address (e.g., http://192.168.1.100:5055) instead of a hostname for the Overseerr URL.
-        </div>
-
-        <div class="success">
-            <strong>Vercel Users:</strong> Your addon is deployed on Vercel's global CDN. Video playback and API calls should work reliably.
+            <strong>🔄 Auto-API Key Support:</strong> The system automatically handles base64 encoded API keys. Paste either format - it will work!
         </div>
         
         <div class="container">
@@ -688,14 +633,13 @@ app.get("/config", (req, res) => {
                 <small>Get from: https://www.themoviedb.org/settings/api</small>
                 
                 <h3>Overseerr URL *</h3>
-                <input type="text" id="overseerrUrl" placeholder="https://overseerr.example.com or http://192.168.1.100:5055" required>
-                <small>Your Overseerr instance URL (use IP address in Docker to avoid DNS issues)</small>
+                <input type="text" id="overseerrUrl" placeholder="https://overseerr.example.com" required>
+                <small>Your Overseerr instance URL</small>
                 
                 <h3>Overseerr API Key *</h3>
-                <input type="text" id="overseerrApi" placeholder="Your RAW Overseerr API Key (not base64)" required>
-                <small><strong>Important:</strong> Get from Overseerr: Settings → API Keys → Generate New API Key</small>
-                <small style="color: #8ef;">⚠️ Use the <strong>raw key</strong> that looks like: <code>17294822-6417-1c61-56a2-9300a4265a90d</code></small>
-                <small style="color: #f88;">🚫 Do NOT base64 encode it!</small>
+                <input type="text" id="overseerrApi" placeholder="Your Overseerr API Key (any format)" required>
+                <small>Get from Overseerr: Settings → API Keys → Generate New API Key</small>
+                <small style="color: #8ef;">✅ Auto-decoding supported: Use raw key or base64 encoded</small>
                 
                 <button type="button" onclick="generateAddon()">Generate Addon URL</button>
                 <button type="button" onclick="testConfiguration()" class="btn-test">Test Configuration</button>
@@ -705,14 +649,13 @@ app.get("/config", (req, res) => {
         <div id="result" style="display: none;" class="container">
             <h3>📦 Your Addon URL</h3>
             <div class="addon-url" id="addonUrl"></div>
-            <p><strong>Installation Options:</strong></p>
             
             <div style="margin: 15px 0;">
                 <button onclick="installInStremio()" class="btn-install">🚀 Install in Stremio (Auto)</button>
                 <p><small>This will automatically open Stremio and install the addon</small></p>
             </div>
             
-            <p><strong>OR Manual Installation:</strong></p>
+            <p><strong>Manual Installation:</strong></p>
             <ol>
                 <li>Open Stremio</li>
                 <li>Click the puzzle piece icon (Addons)</li>
@@ -720,7 +663,6 @@ app.get("/config", (req, res) => {
                 <li>Paste the URL above and click "Install"</li>
             </ol>
             
-            <p><strong>Note:</strong> Always test video playback first!</p>
             <a href="/video-test" target="_blank" class="btn-test">Test Video Playback</a>
         </div>
 
@@ -741,7 +683,7 @@ app.get("/config", (req, res) => {
                     return;
                 }
 
-                document.getElementById('testResults').innerHTML = '<div class="test-result">Testing configuration... (this may take a few seconds)</div>';
+                document.getElementById('testResults').innerHTML = '<div class="test-result">Testing configuration...</div>';
 
                 try {
                     const response = await fetch('/api/test-configuration', {
@@ -790,7 +732,6 @@ app.get("/config", (req, res) => {
                 
                 document.getElementById('addonUrl').textContent = currentAddonUrl;
                 document.getElementById('result').style.display = 'block';
-                
                 document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
             }
 
@@ -800,45 +741,15 @@ app.get("/config", (req, res) => {
                     return;
                 }
 
-                // Convert to stremio protocol URL
                 const stremioUrl = 'stremio://' + currentAddonUrl.replace(/^https?:\\/\\//, '');
-                
-                console.log('Opening Stremio with URL:', stremioUrl);
-                
-                // Try to open Stremio
                 window.location.href = stremioUrl;
                 
-                // Fallback: show instructions if Stremio doesn't open
                 setTimeout(() => {
                     if (!document.hidden) {
                         alert('Stremio not detected. Please make sure Stremio is installed and running, or manually copy the addon URL.');
                     }
                 }, 1000);
             }
-
-            // Auto-fill with URL parameters if present
-            function getUrlParam(name) {
-                const urlParams = new URLSearchParams(window.location.search);
-                return urlParams.get(name);
-            }
-
-            // Check for pre-filled values from URL
-            window.addEventListener('load', () => {
-                const tmdbKey = getUrlParam('tmdbKey');
-                const overseerrUrl = getUrlParam('overseerrUrl');
-                const overseerrApi = getUrlParam('overseerrApi');
-
-                if (tmdbKey) document.getElementById('tmdbKey').value = tmdbKey;
-                if (overseerrUrl) document.getElementById('overseerrUrl').value = overseerrUrl;
-                if (overseerrApi) document.getElementById('overseerrApi').value = overseerrApi;
-
-                // Auto-generate if all parameters are present
-                if (tmdbKey && overseerrUrl && overseerrApi) {
-                    setTimeout(() => {
-                        generateAddon();
-                    }, 500);
-                }
-            });
         </script>
     </body>
     </html>
@@ -873,7 +784,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`❤️  Health check: ${SERVER_URL}/health`);
     console.log(`🚀 Deployment: ${process.env.VERCEL ? 'Vercel' : 'Docker/Local'}`);
     
-    // Check if local video file exists
     const localVideoPath = path.join(__dirname, "public", "wait.mp4");
     if (fs.existsSync(localVideoPath)) {
         const stats = fs.statSync(localVideoPath);
@@ -883,5 +793,4 @@ app.listen(PORT, '0.0.0.0', () => {
     }
 });
 
-// Export for Vercel
 export default app;
