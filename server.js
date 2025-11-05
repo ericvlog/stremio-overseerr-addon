@@ -419,6 +419,13 @@ app.get("/stream/:type/:id.json", (req, res) => {
 // ─── Test Video Endpoint with Overseerr Request ────────
 app.get("/test-video", async (req, res) => {
     console.log(`[TEST] Test video requested with Overseerr processing`);
+    console.log('[TEST] query:', req.query);
+    console.log('[TEST] headers:', {
+        host: req.headers.host,
+        'user-agent': req.headers['user-agent'],
+        range: req.headers.range,
+        referer: req.headers.referer || req.headers.referrer
+    });
     
     // Extract request parameters from query
     const { config, type, tmdbId, title, season, episode } = req.query;
@@ -446,7 +453,7 @@ app.get("/test-video", async (req, res) => {
                         console.error(`[OVERSEERR] ❌ Request failed for "${title}": ${result.error}`);
                     }
                 } catch (error) {
-                    console.error(`[OVERSEERR] ❌ Request error for "${title}": ${error.message}`);
+                    console.error(`[OVERSEERR] ❌ Request error for "${title}":`, error);
                 } finally {
                     pendingRequests.delete(requestKey);
                     console.log(`[OVERSEERR] 🏁 Request processing completed for "${title}"`);
@@ -457,7 +464,15 @@ app.get("/test-video", async (req, res) => {
         }
     }
 
-    res.redirect("http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4");
+    // Always redirect to the wait video (Stremio will attempt to play it). Use 302 explicitly.
+    try {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.status(302).redirect("http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4");
+    } catch (err) {
+        console.error('[TEST] Error sending redirect:', err);
+        // If redirect fails, send a minimal 200 OK with a plain message so the client doesn't get a 401
+        res.status(200).send('OK');
+    }
 });
 
 // ─── Health Check ──────────────────
