@@ -146,17 +146,30 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
             body: JSON.stringify(requestBody)
         };
 
-        // Add node-fetch specific options for handling self-signed certs
-        if (normalizedUrl.startsWith('https://')) {
-            fetchOptions.agent = new (await import('https')).Agent({
-                rejectUnauthorized: false
-            });
+        // Try HTTP first if HTTPS fails
+        const isHttps = normalizedUrl.startsWith('https://');
+        const httpUrl = isHttps ? normalizedUrl.replace('https://', 'http://') : normalizedUrl;
+        
+        let response;
+        try {
+            // First try with HTTPS if it's an HTTPS URL
+            if (isHttps) {
+                console.log(`[OVERSEERR] Attempting HTTPS request to: ${normalizedUrl}`);
+                fetchOptions.agent = new (await import('https')).Agent({
+                    rejectUnauthorized: false
+                });
+                response = await fetch(`${normalizedUrl}/api/v1/request`, fetchOptions);
+            }
+        } catch (error) {
+            console.log(`[OVERSEERR] HTTPS request failed, trying HTTP: ${error.message}`);
         }
 
-        const response = await fetch(
-            `${normalizedUrl}/api/v1/request`,
-            fetchOptions
-        );
+        // If HTTPS failed or it's an HTTP URL, try HTTP
+        if (!response) {
+            console.log(`[OVERSEERR] Attempting HTTP request to: ${httpUrl}`);
+            delete fetchOptions.agent; // Remove HTTPS agent for HTTP request
+            response = await fetch(`${httpUrl}/api/v1/request`, fetchOptions);
+        }
 
         console.log(`[OVERSEERR] Response status: ${response.status} ${response.statusText}`);
 
@@ -531,11 +544,33 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
 
         // Test Overseerr API
         try {
-            // Normalize the URL - remove trailing slashes
+            // Normalize the URL and try both HTTPS and HTTP
             const normalizedUrl = overseerrUrl.replace(/\/$/, '');
-            const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
+            const isHttps = normalizedUrl.startsWith('https://');
+            const httpUrl = isHttps ? normalizedUrl.replace('https://', 'http://') : normalizedUrl;
+
+            let overseerrResponse;
+            const fetchOptions = {
                 headers: { 'X-Api-Key': overseerrApi }
-            });
+            };
+
+            try {
+                if (isHttps) {
+                    // Try HTTPS first
+                    fetchOptions.agent = new (await import('https')).Agent({
+                        rejectUnauthorized: false
+                    });
+                    overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, fetchOptions);
+                }
+            } catch (error) {
+                console.log(`[TEST] HTTPS request failed, trying HTTP: ${error.message}`);
+            }
+
+            // If HTTPS failed or it's an HTTP URL, try HTTP
+            if (!overseerrResponse) {
+                delete fetchOptions.agent;
+                overseerrResponse = await fetch(`${httpUrl}/api/v1/user`, fetchOptions);
+            }
 
             if (overseerrResponse.ok) {
                 results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
