@@ -166,12 +166,12 @@ function decodeConfig(configString) {
         // Simple base64 decoding of JSON configuration
         const configJson = Buffer.from(configString, 'base64').toString('utf8');
         const config = JSON.parse(configJson);
-        
+
         // Validate required fields
         if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
             throw new Error('Missing required configuration fields');
         }
-        
+
         return config;
     } catch (error) {
         console.error('[CONFIG] Error decoding configuration:', error.message);
@@ -187,7 +187,7 @@ function encodeConfig(config) {
         overseerrApi: config.overseerrApi,
         v: '1.0' // configuration version
     };
-    
+
     // Convert to base64
     const configJson = JSON.stringify(configObj);
     return Buffer.from(configJson).toString('base64');
@@ -196,15 +196,15 @@ function encodeConfig(config) {
 // ─── NEW: Configured Manifest for User-specific URLs ───────────────────
 app.get("/configured/:config/manifest.json", (req, res) => {
     const { config } = req.params;
-    
+
     console.log(`[MANIFEST] Configured manifest requested with config: ${config.substring(0, 20)}...`);
-    
+
     // Decode configuration
     const userConfig = decodeConfig(config);
     if (!userConfig) {
         return res.status(400).json({ error: 'Invalid configuration' });
     }
-    
+
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.json({
@@ -249,13 +249,13 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
                     const tmdbResponse = await fetch(
                         `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${userConfig.tmdbKey}`
                     );
-                    
+
                     if (tmdbResponse.ok) {
                         const tvData = await tmdbResponse.json();
                         const allSeasons = tvData.seasons
                             .filter(season => season.season_number > 0)
                             .map(season => season.season_number);
-                        
+
                         requestBody.seasons = allSeasons;
                         console.log(`[REQUEST] Setting seasons to all available: [${allSeasons.join(', ')}]`);
                     } else {
@@ -304,7 +304,7 @@ async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum
     }
 }
 
-// ─── NEW: Configured Video Route (SAME LOGIC, DIFFERENT CONFIG) ───────
+// ─── NEW: Configured Video Route (FIXED STREAMING) ───────
 app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
     const { config, type, tmdbId } = req.params;
     const { title, season, episode, request_type } = req.query;
@@ -370,59 +370,14 @@ app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
         console.log(`[VIDEO] Request already processed for ${requestKey}`);
     }
 
-    // Check if local video exists
-    const localVideoPath = getVideoPath();
-
     // Set CORS headers for Stremio
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
 
-    if (localVideoPath) {
-        console.log(`[VIDEO] Serving local video file for ${mediaName}`);
-
-        // Get file stats
-        const stat = fs.statSync(localVideoPath);
-        const fileSize = stat.size;
-        const range = req.headers.range;
-
-        console.log(`[VIDEO] File size: ${fileSize} bytes`);
-        console.log(`[VIDEO] Range header: ${range}`);
-
-        // Handle range requests for video seeking
-        if (range) {
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            const chunksize = (end - start) + 1;
-            
-            console.log(`[VIDEO] Range request: ${start}-${end}, chunk size: ${chunksize}`);
-            
-            const file = fs.createReadStream(localVideoPath, { start, end });
-            const head = {
-                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': chunksize,
-                'Content-Type': 'video/mp4',
-            };
-            console.log(`[VIDEO] Sending 206 response with headers:`, head);
-            res.writeHead(206, head);
-            file.pipe(res);
-        } else {
-            // Serve entire video
-            const head = {
-                'Content-Length': fileSize,
-                'Content-Type': 'video/mp4',
-            };
-            console.log(`[VIDEO] Sending 200 response with headers:`, head);
-            res.writeHead(200, head);
-            fs.createReadStream(localVideoPath).pipe(res);
-        }
-    } else {
-        // Fallback to GitHub video
-        console.log(`[VIDEO] Local video not found, redirecting to GitHub video for ${mediaName}`);
-        res.redirect('https://github.com/ericvlog/stremio-overseerr-addon/raw/refs/heads/main/wait.mp4');
-    }
+    // FIXED: Always redirect to CDN video for reliable streaming
+    console.log(`[VIDEO] Redirecting to CDN video for ${mediaName}`);
+    res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
 });
 
 // ─── NEW: Configured Stream Endpoint (SAME LOGIC, DIFFERENT CONFIG) ───
@@ -513,7 +468,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
                 streams.push({
                     title: `Request Full Series (Overseerr)`,
                     url: seriesUrl,
-                    name: "Overseerr", 
+                    name: "Overseerr",
                     behaviorHints: {
                         notWebReady: true,
                         bingeGroup: `overseerr-${tmdbId}-series`
@@ -566,7 +521,7 @@ app.get("/manifest.json", (req, res) => {
     });
 });
 
-// ─── ORIGINAL: Video Route for Stremio ────────────
+// ─── ORIGINAL: Video Route for Stremio (FIXED STREAMING) ────────────
 app.get("/video/:type/:tmdbId", async (req, res) => {
     const { type, tmdbId } = req.params;
     const { title, season, episode, request_type } = req.query;
@@ -623,59 +578,14 @@ app.get("/video/:type/:tmdbId", async (req, res) => {
         console.log(`[VIDEO] Request already processed for ${requestKey}`);
     }
 
-    // Check if local video exists
-    const localVideoPath = getVideoPath();
-
     // Set CORS headers for Stremio
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
 
-    if (localVideoPath) {
-        console.log(`[VIDEO] Serving local video file for ${mediaName}`);
-
-        // Get file stats
-        const stat = fs.statSync(localVideoPath);
-        const fileSize = stat.size;
-        const range = req.headers.range;
-
-        console.log(`[VIDEO] File size: ${fileSize} bytes`);
-        console.log(`[VIDEO] Range header: ${range}`);
-
-        // Handle range requests for video seeking
-        if (range) {
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            const chunksize = (end - start) + 1;
-            
-            console.log(`[VIDEO] Range request: ${start}-${end}, chunk size: ${chunksize}`);
-            
-            const file = fs.createReadStream(localVideoPath, { start, end });
-            const head = {
-                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': chunksize,
-                'Content-Type': 'video/mp4',
-            };
-            console.log(`[VIDEO] Sending 206 response with headers:`, head);
-            res.writeHead(206, head);
-            file.pipe(res);
-        } else {
-            // Serve entire video
-            const head = {
-                'Content-Length': fileSize,
-                'Content-Type': 'video/mp4',
-            };
-            console.log(`[VIDEO] Sending 200 response with headers:`, head);
-            res.writeHead(200, head);
-            fs.createReadStream(localVideoPath).pipe(res);
-        }
-    } else {
-        // Fallback to GitHub video
-        console.log(`[VIDEO] Local video not found, redirecting to GitHub video for ${mediaName}`);
-        res.redirect('https://github.com/ericvlog/stremio-overseerr-addon/raw/refs/heads/main/wait.mp4');
-    }
+    // FIXED: Always redirect to CDN video for reliable streaming
+    console.log(`[VIDEO] Redirecting to CDN video for ${mediaName}`);
+    res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
 });
 
 // ─── ORIGINAL: Stream Endpoint for Stremio ───────
@@ -832,7 +742,7 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
                 headers: { 'X-Api-Key': overseerrApi }
             });
-            
+
             if (overseerrResponse.ok) {
                 results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
             } else {
@@ -843,7 +753,7 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
         }
 
         const allSuccess = results.every(result => result.status === 'success');
-        
+
         res.json({
             success: allSuccess,
             results: results
@@ -909,19 +819,19 @@ app.get("/", (req, res) => {
 
             <form id="configForm">
                 <h2>🔑 API Configuration</h2>
-                
+
                 <div class="form-group">
                     <label for="tmdbKey">TMDB API Key *</label>
                     <input type="text" id="tmdbKey" name="tmdbKey" required value="${TMDB_API_KEY || ''}">
                     <div class="help-text">Get your free API key from: https://www.themoviedb.org/settings/api</div>
                 </div>
-                
+
                 <div class="form-group">
                     <label for="overseerrUrl">Overseerr URL *</label>
                     <input type="text" id="overseerrUrl" name="overseerrUrl" required value="${OVERSEERR_URL || ''}" placeholder="https://overseerr.example.com or http://192.168.1.100:5055">
                     <div class="help-text">Your Overseerr instance URL (supports both domains and IP addresses)</div>
                 </div>
-                
+
                 <div class="form-group">
                     <label for="overseerrApi">Overseerr API Key *</label>
                     <input type="text" id="overseerrApi" name="overseerrApi" required value="${OVERSEERR_API || ''}">
@@ -954,7 +864,7 @@ app.get("/", (req, res) => {
 
             <h3>🎬 Critical Video Playback Tests</h3>
             <p>Test if the video playback works in your browser (required for Stremio):</p>
-            
+
             <div class="video-tests">
                 <div class="video-test-item">
                     <h4>Direct Video Test</h4>
@@ -993,7 +903,7 @@ app.get("/", (req, res) => {
             async function testConfiguration() {
                 const form = document.getElementById('configForm');
                 const formData = new FormData(form);
-                
+
                 const config = {
                     tmdbKey: formData.get('tmdbKey'),
                     overseerrUrl: formData.get('overseerrUrl'),
@@ -1006,7 +916,7 @@ app.get("/", (req, res) => {
                 }
 
                 document.getElementById('testResults').innerHTML = '<div class="loading">Testing configuration... (this may take a few seconds)</div>';
-                
+
                 const testButton = document.querySelector('.test-section .btn');
                 testButton.disabled = true;
                 testButton.textContent = 'Testing...';
@@ -1021,22 +931,22 @@ app.get("/", (req, res) => {
                     });
 
                     const result = await response.json();
-                    
+
                     let html = '';
                     if (result.success) {
                         html += '<div class="success">✅ All tests passed! Your configuration is working correctly.</div>';
                     } else {
                         html += '<div class="error">❌ Some tests failed. Please check your configuration.</div>';
                     }
-                    
+
                     result.results.forEach(test => {
                         const icon = test.status === 'success' ? '✅' : '❌';
                         const className = test.status === 'success' ? 'test-success' : 'test-error';
                         html += '<div class="test-result ' + className + '">' + icon + ' <strong>' + test.service + ':</strong> ' + test.message + '</div>';
                     });
-                    
+
                     document.getElementById('testResults').innerHTML = html;
-                    
+
                 } catch (error) {
                     document.getElementById('testResults').innerHTML = '<div class="error">❌ Test failed: ' + error.message + '</div>';
                 } finally {
@@ -1048,7 +958,7 @@ app.get("/", (req, res) => {
             function generateAddon() {
                 const form = document.getElementById('configForm');
                 const formData = new FormData(form);
-                
+
                 const config = {
                     tmdbKey: formData.get('tmdbKey'),
                     overseerrUrl: formData.get('overseerrUrl'),
@@ -1064,14 +974,14 @@ app.get("/", (req, res) => {
                 // Encode configuration to base64
                 const configJson = JSON.stringify(config);
                 const configBase64 = btoa(unescape(encodeURIComponent(configJson)));
-                
+
                 // Generate addon URL
                 const addonUrl = window.location.origin + '/configured/' + configBase64 + '/manifest.json';
-                
+
                 // Display result
                 document.getElementById('addonUrl').textContent = addonUrl;
                 document.getElementById('result').style.display = 'block';
-                
+
                 // Store for installation
                 window.generatedAddonUrl = addonUrl;
             }
@@ -1087,7 +997,7 @@ app.get("/", (req, res) => {
     </body>
     </html>
     `;
-    
+
     res.send(html);
 });
 
@@ -1167,7 +1077,7 @@ app.get("/health", (req, res) => {
 app.get("/status/:type/:tmdbId", (req, res) => {
     const { type, tmdbId } = req.params;
     const { season, request_type } = req.query;
-    
+
     // Use the same key generation logic as video endpoint
     let requestKey;
     if (type === 'movie') {
@@ -1193,7 +1103,7 @@ app.get("/test-video", (req, res) => {
     if (localVideoPath) {
         res.sendFile(localVideoPath);
     } else {
-        res.redirect('https://github.com/ericvlog/stremio-overseerr-addon/raw/refs/heads/main/wait.mp4');
+        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
     }
 });
 
@@ -1214,7 +1124,7 @@ app.listen(PORT, '0.0.0.0', () => {
         const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
         console.log(`🎥 Using local video: public/wait.mp4 (${fileSizeMB} MB)`);
     } else {
-        console.log(`🎥 Using GitHub video: https://github.com/ericvlog/stremio-overseerr-addon/raw/refs/heads/main/wait.mp4`);
+        console.log(`🎥 Using CDN video: https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4`);
     }
 
     // Run startup tests
