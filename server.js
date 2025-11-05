@@ -68,10 +68,34 @@ function decodeConfig(configString) {
 // ─── Make Overseerr Request ────────────
 async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, requestType = 'season', userConfig = null) {
     try {
-        console.log(`[OVERSEERR] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - "${mediaName}"`);
+        // Validate required parameters
+        if (!tmdbId) {
+            throw new Error('TMDB ID is required');
+        }
+        if (!type || !['movie', 'series'].includes(type)) {
+            throw new Error('Invalid media type. Must be "movie" or "series"');
+        }
+        if (!mediaName) {
+            throw new Error('Media name is required');
+        }
+
+        // Validate season number for TV shows
+        if (type === 'series' && requestType === 'season') {
+            if (seasonNumber === null || isNaN(seasonNumber)) {
+                throw new Error('Valid season number is required for TV show season requests');
+            }
+        }
+
+        // Ensure TMDB ID is a number
+        const numericTmdbId = parseInt(tmdbId);
+        if (isNaN(numericTmdbId)) {
+            throw new Error('TMDB ID must be a valid number');
+        }
+
+        console.log(`[OVERSEERR] Making ${requestType} request for ${type} TMDB ID: ${numericTmdbId} - "${mediaName}"`);
 
         const requestBody = {
-            mediaId: parseInt(tmdbId),
+            mediaId: numericTmdbId,
             mediaType: type === 'movie' ? 'movie' : 'tv'
         };
 
@@ -79,12 +103,30 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
             requestBody.seasons = [seasonNumber];
         }
 
+        // Get and validate Overseerr configuration
         const overseerrUrl = userConfig ? userConfig.overseerrUrl : process.env.OVERSEERR_URL;
         const overseerrApi = userConfig ? userConfig.overseerrApi : process.env.OVERSEERR_API;
 
         if (!overseerrUrl || !overseerrApi) {
-            console.error(`[OVERSEERR] Missing Overseerr configuration`);
-            return { success: false, error: "Missing Overseerr configuration" };
+            const error = 'Missing Overseerr configuration. Please ensure overseerrUrl and overseerrApi are provided.';
+            console.error(`[OVERSEERR] ${error}`);
+            return { success: false, error };
+        }
+
+        // Validate Overseerr URL format
+        try {
+            new URL(overseerrUrl);
+        } catch (error) {
+            const message = `Invalid Overseerr URL format: ${overseerrUrl}`;
+            console.error(`[OVERSEERR] ${message}`);
+            return { success: false, error: message };
+        }
+
+        // Validate API key format (basic check)
+        if (typeof overseerrApi !== 'string' || overseerrApi.length < 8) {
+            const error = 'Invalid Overseerr API key format';
+            console.error(`[OVERSEERR] ${error}`);
+            return { success: false, error };
         }
 
         // Normalize URL - remove trailing slashes
@@ -280,22 +322,38 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             const seasonNum = season ? parseInt(season) : null;
             const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
 
-            // Make the request in background without blocking response
-            setTimeout(async () => {
+            // Make the request immediately but don't block response
+            (async () => {
                 try {
+                    console.log(`[OVERSEERR] 🔄 Making immediate request for "${title}"`);
                     const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
                     if (result.success) {
-                        console.log(`[BACKGROUND] ✅ Request successful for "${title}" - ID: ${result.requestId}`);
+                        console.log(`[OVERSEERR] ✅ Request successful for "${title}" - ID: ${result.requestId}`);
+                        // Keep track of successful request
+                        global.lastSuccessfulRequest = {
+                            title,
+                            requestId: result.requestId,
+                            timestamp: new Date().toISOString()
+                        };
                     } else {
-                        console.log(`[BACKGROUND] ❌ Request failed for "${title}": ${result.error}`);
+                        console.error(`[OVERSEERR] ❌ Request failed for "${title}"`);
+                        console.error(`[OVERSEERR] Error details:`, result.error);
+                        throw new Error(result.error);
                     }
                 } catch (error) {
-                    console.error(`[BACKGROUND] ❌ Request error for "${title}": ${error.message}`);
+                    console.error(`[OVERSEERR] ❌ Request error for "${title}"`);
+                    console.error(`[OVERSEERR] Full error:`, error);
+                    // Keep track of failed request
+                    global.lastFailedRequest = {
+                        title,
+                        error: error.message,
+                        timestamp: new Date().toISOString()
+                    };
                 } finally {
                     // Clean up pending request
                     pendingRequests.delete(requestKey);
                 }
-            }, 100);
+            })();
         } else {
             console.log(`[BACKGROUND] Request already pending for: "${title}"`);
         }
