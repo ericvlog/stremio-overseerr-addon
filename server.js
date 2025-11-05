@@ -282,7 +282,11 @@ app.get("/configured/:config/manifest.json", (req, res) => {
         resources: ["stream"],
         types: ["movie", "series"],
         catalogs: [],
-        idPrefixes: ["tt"]
+        idPrefixes: ["tt"],
+        behaviorHints: {
+            configurable: true,
+            configurationRequired: true
+        }
     });
 });
 
@@ -395,7 +399,11 @@ app.get("/manifest.json", (req, res) => {
         resources: ["stream"],
         types: ["movie", "series"],
         catalogs: [],
-        idPrefixes: ["tt"]
+        idPrefixes: ["tt"],
+        behaviorHints: {
+            configurable: true,
+            configurationRequired: true
+        }
     });
 });
 
@@ -407,51 +415,8 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    try {
-        const parsedId = parseStremioId(id, type);
-        if (!parsedId) {
-            return res.json({ streams: [] });
-        }
-
-        let tmdbId;
-        let title = `ID: ${id}`;
-
-        // Convert IMDb to TMDB if needed
-        if (parsedId.imdbId && process.env.TMDB_API_KEY) {
-            const tmdbResponse = await fetch(
-                `https://api.themoviedb.org/3/find/${parsedId.imdbId}?api_key=${process.env.TMDB_API_KEY}&external_source=imdb_id`
-            );
-
-            if (tmdbResponse.ok) {
-                const tmdbData = await tmdbResponse.json();
-                const result = type === 'movie' ? tmdbData.movie_results?.[0] : tmdbData.tv_results?.[0];
-                if (result) {
-                    tmdbId = result.id;
-                    title = result.title || result.name;
-                }
-            }
-        } else if (parsedId.tmdbId) {
-            tmdbId = parsedId.tmdbId;
-        }
-
-        if (!tmdbId) {
-            return res.json({ streams: [] });
-        }
-
-        let streams = [];
-
-        if (type === 'movie') {
-            streams.push(createStreamObject(title, 'movie', tmdbId, null, null));
-        } else if (type === 'series') {
-            if (parsedId.season !== null) {
-                streams.push(createStreamObject(title, 'series', tmdbId, parsedId.season, parsedId.episode));
-            } else {
-                streams.push(createStreamObject(title, 'series', tmdbId, null, null));
-            }
-        }
-
-        console.log(`[STREAM] Returning ${streams.length} stream(s) for default addon`);
-        res.json({ streams: streams });
+    // For unconfigured addon, return empty streams to prompt configuration
+    res.json({ streams: [] });
 
     } catch (error) {
         console.error('[STREAM] Error:', error.message);
