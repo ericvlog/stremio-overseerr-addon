@@ -115,84 +115,66 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
     }
 }
 
-// ─── PROXY ENDPOINT: Triggers request AND serves wait video ───────
-app.get("/configured/:config/proxy/:type/:tmdbId", async (req, res) => {
+// ─── REQUEST TRIGGER ENDPOINT (called when user selects stream) ───────
+app.get("/configured/:config/trigger/:type/:tmdbId", async (req, res) => {
     const { config, type, tmdbId } = req.params;
     const { title, season, request_type } = req.query;
     const mediaName = title || 'Unknown';
 
-    console.log(`[PROXY] Proxy endpoint called for ${type} ${tmdbId} - ${mediaName}`);
+    console.log(`[TRIGGER] User selected stream for ${type} ${tmdbId} - ${mediaName}`);
 
     // Decode configuration
     const userConfig = decodeConfig(config);
     if (!userConfig) {
-        console.log(`[PROXY] Invalid configuration`);
-        return res.status(400).send('Invalid configuration');
+        console.log(`[TRIGGER] Invalid configuration`);
+        return res.json({ success: false, error: "Invalid configuration" });
     }
 
-    // TRIGGER THE OVERSEERR REQUEST (wait for it to complete)
+    // Make the Overseerr request
     const seasonNum = season ? parseInt(season) : null;
     const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
 
-    console.log(`[PROXY] Making Overseerr request for: ${mediaName}`);
+    console.log(`[TRIGGER] Making Overseerr request for: ${mediaName}`);
     
     try {
         const result = await makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, reqType, userConfig);
         
         if (result.success) {
-            console.log(`[PROXY] ✅ Request successful for ${mediaName}, serving wait video`);
+            console.log(`[TRIGGER] ✅ Request successful for ${mediaName}`);
+            res.json({ 
+                success: true, 
+                message: `Request for "${mediaName}" submitted to Overseerr!`,
+                requestId: result.requestId
+            });
         } else {
-            console.log(`[PROXY] ❌ Request failed for ${mediaName}: ${result.error}, but still serving wait video`);
+            console.log(`[TRIGGER] ❌ Request failed for ${mediaName}: ${result.error}`);
+            res.json({ 
+                success: false, 
+                error: `Failed to submit request: ${result.error}` 
+            });
         }
     } catch (error) {
-        console.error(`[PROXY] ❌ Request error for ${mediaName}: ${error.message}`);
-    }
-
-    // SERVE THE WAIT VIDEO
-    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
-    
-    if (fs.existsSync(localVideoPath)) {
-        console.log(`[PROXY] Serving local wait video for ${mediaName}`);
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Accept-Ranges', 'bytes');
-        
-        const stats = fs.statSync(localVideoPath);
-        const fileSize = stats.size;
-        
-        // Handle range requests for video streaming
-        const range = req.headers.range;
-        if (range) {
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            const chunksize = (end - start) + 1;
-            
-            const file = fs.createReadStream(localVideoPath, { start, end });
-            const head = {
-                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': chunksize,
-                'Content-Type': 'video/mp4',
-            };
-            
-            res.writeHead(206, head);
-            file.pipe(res);
-        } else {
-            const head = {
-                'Content-Length': fileSize,
-                'Content-Type': 'video/mp4',
-            };
-            res.writeHead(200, head);
-            fs.createReadStream(localVideoPath).pipe(res);
-        }
-    } else {
-        console.log(`[PROXY] Serving CDN wait video for ${mediaName}`);
-        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
+        console.error(`[TRIGGER] ❌ Request error for ${mediaName}: ${error.message}`);
+        res.json({ 
+            success: false, 
+            error: `Request error: ${error.message}` 
+        });
     }
 });
 
-// ─── STREAM FORMAT with PROXY URL ──────────────────
+// ─── WORKING STREAM FORMAT (using external videos that actually play) ──────────────────
 function createStreamObject(title, type, tmdbId, season = null, episode = null, config) {
+    // Use reliable public domain video URLs that WORK in Stremio
+    const streamUrls = [
+        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+    ];
+
+    const randomUrl = streamUrls[Math.floor(Math.random() * streamUrls.length)];
+    
     let streamTitle;
     if (type === 'movie') {
         streamTitle = `Request "${title}" in Overseerr`;
@@ -204,17 +186,31 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null, 
         streamTitle = `Request "${title}" in Overseerr`;
     }
 
-    // Use PROXY endpoint that triggers request AND serves wait video
-    const proxyUrl = `${SERVER_URL}/configured/${config}/proxy/${type}/${tmdbId}?title=${encodeURIComponent(title)}${season ? `&season=${season}` : ''}${type === 'series' ? `&request_type=season` : ''}`;
+    // Create trigger URL that will be called when user selects the stream
+    const triggerUrl = `${SERVER_URL}/configured/${config}/trigger/${type}/${tmdbId}?title=${encodeURIComponent(title)}${season ? `&season=${season}` : ''}${type === 'series' ? `&request_type=season` : ''}`;
 
+    // WORKING STREMIO STREAM FORMAT
     return {
         name: "Overseerr",
         title: streamTitle,
-        url: proxyUrl, // This will trigger the request AND serve wait.mp4
+        url: randomUrl, // External video that actually plays in Stremio
+        
+        // CRITICAL: These behaviorHints make it work in Stremio
         behaviorHints: {
-            notWebReady: false, // This is a playable video
-            bingeGroup: `overseerr-${type}-${tmdbId}`
-        }
+            notWebReady: false, // This IS a playable video stream
+            bingeGroup: `overseerr-${type}-${tmdbId}`,
+            
+            // Stremio-specific hints that help with playback
+            headers: {
+                "User-Agent": "Stremio/4.0"
+            }
+        },
+        
+        // Additional metadata
+        description: `Click to request "${title}" in Overseerr`,
+        
+        // Store trigger URL in a custom field (for reference)
+        overseerrTrigger: triggerUrl
     };
 }
 
@@ -311,6 +307,24 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: ${title}`);
         
+        // TRIGGER THE OVERSEERR REQUEST IN BACKGROUND when stream is returned
+        // This ensures the request is made even if Stremio doesn't call our trigger endpoint
+        const seasonNum = season ? parseInt(season) : null;
+        const reqType = type === 'movie' ? 'movie' : 'season';
+        
+        console.log(`[BACKGROUND] Auto-triggering request for: ${title}`);
+        makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig)
+            .then(result => {
+                if (result.success) {
+                    console.log(`[BACKGROUND] ✅ Auto-request successful for ${title}`);
+                } else {
+                    console.log(`[BACKGROUND] ❌ Auto-request failed for ${title}: ${result.error}`);
+                }
+            })
+            .catch(err => {
+                console.error(`[BACKGROUND] ❌ Auto-request error for ${title}: ${err.message}`);
+            });
+        
         res.json({ 
             streams: streams
         });
@@ -336,76 +350,6 @@ app.get("/manifest.json", (req, res) => {
         catalogs: [],
         idPrefixes: ["tt"]
     });
-});
-
-// ─── Default Proxy Endpoint ───────
-app.get("/proxy/:type/:tmdbId", async (req, res) => {
-    const { type, tmdbId } = req.params;
-    const { title, season, request_type } = req.query;
-    const mediaName = title || 'Unknown';
-
-    console.log(`[PROXY] Default proxy endpoint for ${type} ${tmdbId} - ${mediaName}`);
-
-    // Only trigger if we have environment variables
-    if (process.env.OVERSEERR_URL && process.env.OVERSEERR_API) {
-        const seasonNum = season ? parseInt(season) : null;
-        const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
-
-        console.log(`[PROXY] Making Overseerr request for: ${mediaName}`);
-        
-        try {
-            const result = await makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, reqType);
-            
-            if (result.success) {
-                console.log(`[PROXY] ✅ Request successful for ${mediaName}`);
-            } else {
-                console.log(`[PROXY] ❌ Request failed for ${mediaName}: ${result.error}`);
-            }
-        } catch (error) {
-            console.error(`[PROXY] ❌ Request error for ${mediaName}: ${error.message}`);
-        }
-    }
-
-    // Serve wait video
-    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
-    
-    if (fs.existsSync(localVideoPath)) {
-        console.log(`[PROXY] Serving local wait video for ${mediaName}`);
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Accept-Ranges', 'bytes');
-        
-        const stats = fs.statSync(localVideoPath);
-        const fileSize = stats.size;
-        
-        const range = req.headers.range;
-        if (range) {
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            const chunksize = (end - start) + 1;
-            
-            const file = fs.createReadStream(localVideoPath, { start, end });
-            const head = {
-                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': chunksize,
-                'Content-Type': 'video/mp4',
-            };
-            
-            res.writeHead(206, head);
-            file.pipe(res);
-        } else {
-            const head = {
-                'Content-Length': fileSize,
-                'Content-Type': 'video/mp4',
-            };
-            res.writeHead(200, head);
-            fs.createReadStream(localVideoPath).pipe(res);
-        }
-    } else {
-        console.log(`[PROXY] Serving CDN wait video for ${mediaName}`);
-        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
-    }
 });
 
 // ─── Original Stream Endpoint ───────
@@ -454,7 +398,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
             streams.push({
                 name: "Overseerr",
                 title: `Request "${title}" in Overseerr`,
-                url: `${SERVER_URL}/proxy/movie/${tmdbId}?title=${encodeURIComponent(title)}`,
+                url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
                 behaviorHints: {
                     notWebReady: false,
                     bingeGroup: `overseerr-movie-${tmdbId}`
@@ -465,7 +409,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
                 streams.push({
                     name: "Overseerr",
                     title: `Request Season ${parsedId.season} of "${title}"`,
-                    url: `${SERVER_URL}/proxy/series/${tmdbId}?title=${encodeURIComponent(title)}&season=${parsedId.season}&request_type=season`,
+                    url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
                     behaviorHints: {
                         notWebReady: false,
                         bingeGroup: `overseerr-series-${tmdbId}`
@@ -475,6 +419,21 @@ app.get("/stream/:type/:id.json", async (req, res) => {
         }
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for default addon`);
+        
+        // Auto-trigger request for default addon if environment variables are set
+        if (process.env.OVERSEERR_URL && process.env.OVERSEERR_API) {
+            console.log(`[BACKGROUND] Auto-triggering request for default addon: ${title}`);
+            makeOverseerrRequest(tmdbId, type, title, parsedId.season, type === 'movie' ? 'movie' : 'season')
+                .then(result => {
+                    if (result.success) {
+                        console.log(`[BACKGROUND] ✅ Auto-request successful for ${title}`);
+                    }
+                })
+                .catch(err => {
+                    console.error(`[BACKGROUND] ❌ Auto-request error for ${title}: ${err.message}`);
+                });
+        }
+        
         res.json({ streams: streams });
 
     } catch (error) {
@@ -487,16 +446,8 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 app.get("/test-video", (req, res) => {
     console.log(`[TEST] Test video requested`);
     
-    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
-    
-    if (fs.existsSync(localVideoPath)) {
-        console.log(`[TEST] Serving local video`);
-        res.setHeader('Content-Type', 'video/mp4');
-        res.sendFile(localVideoPath);
-    } else {
-        console.log(`[TEST] Redirecting to CDN video`);
-        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
-    }
+    // Redirect to a working external video
+    res.redirect('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4');
 });
 
 // ─── Configuration Testing Endpoint ─────────────────
@@ -559,7 +510,8 @@ app.get("/health", (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Vercel Serverless Ready',
-        version: '1.0.0'
+        version: '1.0.0',
+        approach: 'EXTERNAL VIDEO URLS + AUTO-TRIGGER REQUESTS'
     });
 });
 
@@ -750,8 +702,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🎬 Test video: ${SERVER_URL}/test-video`);
     console.log(`🎬 Test movie stream: ${SERVER_URL}/stream/movie/tt0133093.json`);
     console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
-    console.log(`🚀 PROXY SYSTEM: Streams now trigger Overseerr requests AND serve wait.mp4`);
-    console.log(`🎯 When user clicks a stream, it will:`);
-    console.log(`   1. Make Overseerr request`);
-    console.log(`   2. Serve wait.mp4 video`);
+    console.log(`🚀 WORKING APPROACH: Using external videos + auto-triggered requests`);
+    console.log(`🎯 Streams will play actual videos AND trigger Overseerr requests automatically`);
 });
