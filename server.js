@@ -408,7 +408,7 @@ app.get("/manifest.json", (req, res) => {
 });
 
 // ─── Default Stream Endpoint ───────
-app.get("/stream/:type/:id.json", async (req, res) => {
+app.get("/stream/:type/:id.json", (req, res) => {
     const { type, id } = req.params;
     console.log(`[STREAM] Default stream requested for ${type} ID: ${id}`);
 
@@ -417,11 +417,6 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 
     // For unconfigured addon, return empty streams to prompt configuration
     res.json({ streams: [] });
-
-    } catch (error) {
-        console.error('[STREAM] Error:', error.message);
-        res.json({ streams: [] });
-    }
 });
 
 // ─── Test Video Endpoint with Overseerr Request ────────
