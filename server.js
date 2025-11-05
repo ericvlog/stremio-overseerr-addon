@@ -282,7 +282,11 @@ app.get("/configured/:config/manifest.json", (req, res) => {
            resources: ["stream"],
            types: ["movie", "series"],
            catalogs: [],
-           idPrefixes: ["tt"]
+           idPrefixes: ["tt"],
+           behaviorHints: {
+               adult: false,
+               p2p: false
+           }
     });
 });
 
@@ -411,7 +415,11 @@ app.get("/manifest.json", (req, res) => {
             resources: ["stream"],
             types: ["movie", "series"],
             catalogs: [],
-            idPrefixes: ["tt"]
+            idPrefixes: ["tt"],
+            behaviorHints: {
+                adult: false,
+                p2p: false
+            }
         });
 });
 
