@@ -65,80 +65,155 @@ function decodeConfig(configString) {
 // ─── Make Overseerr Request ────────────
 async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, requestType = 'season', userConfig = null) {
     try {
-        console.log(`[BACKGROUND] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - ${mediaName}`);
+        console.log(`[OVERSEERR] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - "${mediaName}"`);
 
         const requestBody = {
             mediaId: parseInt(tmdbId),
             mediaType: type === 'movie' ? 'movie' : 'tv'
         };
 
-        if (type === 'series') {
-            if (requestType === 'season' && seasonNumber !== null) {
-                requestBody.seasons = [seasonNumber];
-            }
+        if (type === 'series' && requestType === 'season' && seasonNumber !== null) {
+            requestBody.seasons = [seasonNumber];
         }
 
         const overseerrUrl = userConfig ? userConfig.overseerrUrl : process.env.OVERSEERR_URL;
         const overseerrApi = userConfig ? userConfig.overseerrApi : process.env.OVERSEERR_API;
 
         if (!overseerrUrl || !overseerrApi) {
-            console.error(`[BACKGROUND] Missing Overseerr configuration`);
+            console.error(`[OVERSEERR] Missing Overseerr configuration`);
             return { success: false, error: "Missing Overseerr configuration" };
         }
 
+        // Normalize URL - remove trailing slashes
+        const normalizedUrl = overseerrUrl.replace(/\/$/, '');
+        
+        console.log(`[OVERSEERR] Sending to: ${normalizedUrl}/api/v1/request`);
+        console.log(`[OVERSEERR] Request body:`, JSON.stringify(requestBody));
+
         const response = await fetch(
-            `${overseerrUrl}/api/v1/request`,
+            `${normalizedUrl}/api/v1/request`,
             {
                 method: 'POST',
                 headers: {
                     'X-Api-Key': overseerrApi,
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Stremio-Overseerr-Addon/1.0.0'
                 },
                 body: JSON.stringify(requestBody)
             }
         );
 
+        console.log(`[OVERSEERR] Response status: ${response.status} ${response.statusText}`);
+
         if (response.ok) {
             const data = await response.json();
-            console.log(`[BACKGROUND] ✅ Success: ${mediaName} - Request ID: ${data.id}`);
-            return { success: true, requestId: data.id };
+            console.log(`[OVERSEERR] ✅ SUCCESS: "${mediaName}" - Request ID: ${data.id}`);
+            return { 
+                success: true, 
+                requestId: data.id, 
+                data: data,
+                message: `Request submitted successfully (ID: ${data.id})`
+            };
         } else {
             const errorText = await response.text();
-            console.error(`[BACKGROUND] ❌ Failed: ${mediaName} - ${errorText}`);
-            return { success: false, error: errorText };
+            console.error(`[OVERSEERR] ❌ FAILED: "${mediaName}" - Status: ${response.status}, Error: ${errorText}`);
+            return { 
+                success: false, 
+                error: errorText,
+                status: response.status,
+                statusText: response.statusText,
+                message: `Request failed: ${response.status} ${response.statusText}`
+            };
         }
     } catch (error) {
-        console.error(`[BACKGROUND] ❌ Error: ${mediaName} - ${error.message}`);
-        return { success: false, error: error.message };
+        console.error(`[OVERSEERR] ❌ NETWORK ERROR: "${mediaName}" - ${error.message}`);
+        return { 
+            success: false, 
+            error: error.message,
+            code: error.code,
+            message: `Network error: ${error.message}`
+        };
     }
 }
 
 // ─── STREAM FORMAT USING YOUR WAIT.MP4 ──────────────────
-function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    // Use YOUR wait.mp4 from the CDN
+function createStreamObject(title, type, tmdbId, season = null, episode = null, config = null) {
     const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
 
     let streamTitle;
     if (type === 'movie') {
         streamTitle = `Request "${title}"`;
     } else if (season && episode) {
-        streamTitle = `Request S${season}E${episode}`;
+        streamTitle = `Request S${season}E${episode} of "${title}"`;
     } else if (season) {
-        streamTitle = `Request Season ${season}`;
+        streamTitle = `Request Season ${season} of "${title}"`;
     } else {
         streamTitle = `Request "${title}"`;
+    }
+
+    // Create a unique stream URL that includes the request parameters
+    let streamUrl = waitVideoUrl;
+    
+    // If we have config, create a proxy URL that will trigger the Overseerr request
+    if (config) {
+        const requestParams = new URLSearchParams({
+            tmdbId: tmdbId,
+            type: type,
+            title: title,
+            config: config
+        });
+        
+        if (season) requestParams.append('season', season);
+        if (episode) requestParams.append('episode', episode);
+        
+        streamUrl = `${SERVER_URL}/proxy-stream?${requestParams.toString()}`;
     }
 
     return {
         name: "Overseerr",
         title: streamTitle,
-        url: waitVideoUrl, // Using your wait.mp4
+        url: streamUrl,
         behaviorHints: {
-            notWebReady: false, // This IS a playable video stream
+            notWebReady: false,
             bingeGroup: `overseerr-${type}-${tmdbId}`
         }
     };
 }
+
+// ─── NEW: Proxy Stream Endpoint that triggers Overseerr request ───
+app.get("/proxy-stream", async (req, res) => {
+    const { tmdbId, type, title, season, episode, config } = req.query;
+    
+    console.log(`[PROXY] Stream clicked for: ${title} (TMDB: ${tmdbId})`);
+    
+    try {
+        // Decode the config
+        const userConfig = decodeConfig(config);
+        
+        if (userConfig) {
+            // Trigger Overseerr request
+            const seasonNum = season ? parseInt(season) : null;
+            const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+            
+            console.log(`[PROXY] Making Overseerr request for clicked stream: ${title}`);
+            const overseerrResult = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+            
+            if (overseerrResult.success) {
+                console.log(`[PROXY] ✅ Request submitted for: ${title}`);
+            } else {
+                console.log(`[PROXY] ❌ Request failed for: ${title} - ${overseerrResult.error}`);
+            }
+        }
+        
+        // Redirect to the actual wait.mp4 video
+        res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+        
+    } catch (error) {
+        console.error(`[PROXY] Error: ${error.message}`);
+        // Still redirect to video even if request fails
+        res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+    }
+});
 
 // ─── Configured Manifest ───────────────────
 app.get("/configured/:config/manifest.json", (req, res) => {
@@ -160,7 +235,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint ───
+// ─── Configured Stream Endpoint (FIXED: No auto-request) ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -199,7 +274,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
                 if (result) {
                     tmdbId = result.id;
                     title = result.title || result.name;
-                    console.log(`[STREAM] Converted IMDb ${parsedId.imdbId} to TMDB ${tmdbId} - ${title}`);
+                    console.log(`[STREAM] Converted IMDb ${parsedId.imdbId} to TMDB ${tmdbId} - "${title}"`);
                 } else {
                     console.log(`[STREAM] No TMDB result for IMDb: ${parsedId.imdbId}`);
                     return res.json({ streams: [] });
@@ -210,6 +285,17 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             }
         } else if (parsedId.tmdbId) {
             tmdbId = parsedId.tmdbId;
+            
+            // Get title from TMDB for better display
+            const mediaType = type === 'movie' ? 'movie' : 'tv';
+            const tmdbResponse = await fetch(
+                `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${userConfig.tmdbKey}`
+            );
+            
+            if (tmdbResponse.ok) {
+                const tmdbData = await tmdbResponse.json();
+                title = tmdbData.title || tmdbData.name || title;
+            }
         }
 
         if (!tmdbId) {
@@ -217,35 +303,21 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Build streams array
+        // Build streams array - NO AUTO-REQUEST HERE
         let streams = [];
 
         if (type === 'movie') {
-            streams.push(createStreamObject(title, 'movie', tmdbId));
+            streams.push(createStreamObject(title, 'movie', tmdbId, null, null, config));
         } else if (type === 'series') {
             if (season !== null && episode !== null) {
-                streams.push(createStreamObject(title, 'series', tmdbId, season, episode));
+                streams.push(createStreamObject(title, 'series', tmdbId, season, episode, config));
             } else {
-                streams.push(createStreamObject(title, 'series', tmdbId));
+                streams.push(createStreamObject(title, 'series', tmdbId, null, null, config));
             }
         }
 
-        console.log(`[STREAM] Returning ${streams.length} stream(s) for: ${title}`);
-
-        // ✅ ONLY CHANGE: AWAIT THE OVERSEERR REQUEST
-        const seasonNum = season ? parseInt(season) : null;
-        const reqType = type === 'movie' ? 'movie' : 'season';
-
-        console.log(`[BACKGROUND] Auto-triggering request for: ${title}`);
-        
-        // AWAIT the request instead of using .then()
-        const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
-        
-        if (result.success) {
-            console.log(`[BACKGROUND] ✅ Request successful for ${title}`);
-        } else {
-            console.log(`[BACKGROUND] ❌ Request failed for ${title}: ${result.error}`);
-        }
+        console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
+        console.log(`[STREAM] ✅ No auto-request - Request will only happen when user clicks stream`);
 
         res.json({
             streams: streams
@@ -337,7 +409,6 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 // ─── Test Video Endpoint (Your wait.mp4) ────────
 app.get("/test-video", (req, res) => {
     console.log(`[TEST] Test video requested`);
-    // Redirect to your wait.mp4 on CDN
     res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
 });
 
@@ -347,7 +418,8 @@ app.get("/health", (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
-        video: 'Using your wait.mp4 from CDN'
+        video: 'Using your wait.mp4 from CDN',
+        behavior: 'Requests only on stream click ✅'
     });
 });
 
@@ -409,8 +481,8 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
 // Handle CORS preflight requests
 app.options('*', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, X-Api-Key');
     res.sendStatus(200);
 });
 
@@ -463,6 +535,10 @@ app.get("/", (req, res) => {
         <div class="container">
             <h1>🎬 Stremio Overseerr Addon</h1>
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
+
+            <div class="success">
+                <strong>✅ FIXED:</strong> Overseerr requests now only happen when you click the stream, not when browsing movies!
+            </div>
 
             <form id="configForm">
                 <h2>🔑 API Configuration</h2>
@@ -676,5 +752,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
     console.log(`🎯 Using YOUR wait.mp4 from CDN for all streams`);
-    console.log(`🚀 Complete setup with Overseerr connection testing`);
+    console.log(`🚀 OVERSEERR REQUESTS NOW WORKING - Requests only happen when streams are clicked!`);
+    console.log(`🔧 Fixed: No auto-requests when browsing, only when clicking streams`);
 });
