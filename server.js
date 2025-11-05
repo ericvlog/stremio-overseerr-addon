@@ -20,14 +20,10 @@ app.use(express.static("public"));
 function parseStremioId(id, type) {
     console.log(`[PARSER] Parsing ID: ${id} for type: ${type}`);
 
-    // Movie format: "tt1234567"
     if (type === 'movie' && id.startsWith('tt')) {
         return { imdbId: id, season: null, episode: null };
     }
 
-    // TV Show formats:
-    // Series: "tt1234567"
-    // Episode: "tt1234567:1:1" or "tt1234567:1:2"
     if (type === 'series') {
         if (id.includes(':')) {
             const parts = id.split(':');
@@ -43,7 +39,6 @@ function parseStremioId(id, type) {
         }
     }
 
-    // TMDB ID format (just numbers)
     if (/^\d+$/.test(id)) {
         return { tmdbId: parseInt(id), season: null, episode: null };
     }
@@ -76,13 +71,16 @@ function createStreamObject(title, url, type, tmdbId, season = null) {
         url: url,
         name: "Overseerr",
         behaviorHints: {
+            // CRITICAL: Tell Stremio this is NOT a playable video stream
             notWebReady: true,
-            bingeGroup: `overseerr-${tmdbId}${season ? `-s${season}` : ''}`,
+            // Mark as external player required
+            externalPlayer: true,
+            bingeGroup: `overseerr-${tmdbId}${season ? `-s${season}` : ''}`
         }
     };
 }
 
-// ─── Make Overseerr Request (SERVERLESS COMPATIBLE) ────────────
+// ─── Make Overseerr Request ────────────
 async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, requestType = 'season', userConfig = null) {
     try {
         console.log(`[BACKGROUND] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - ${mediaName}`);
@@ -92,12 +90,9 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
             mediaType: type === 'movie' ? 'movie' : 'tv'
         };
 
-        // Handle seasons for TV shows
         if (type === 'series') {
             if (requestType === 'season' && seasonNumber !== null) {
                 requestBody.seasons = [seasonNumber];
-            } else if (requestType === 'series') {
-                console.log(`[BACKGROUND] Full series request - no specific seasons`);
             }
         }
 
@@ -133,6 +128,78 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
     }
 }
 
+// ─── PROPER VIDEO STREAMING ENDPOINT ───────
+app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
+    const { config, type, tmdbId } = req.params;
+    const { title, season, request_type } = req.query;
+    const mediaName = title || 'Unknown';
+
+    console.log(`[VIDEO] Video endpoint called for ${type} ${tmdbId} - ${mediaName}`);
+
+    // Decode configuration
+    const userConfig = decodeConfig(config);
+    if (!userConfig) {
+        console.log(`[VIDEO] Invalid configuration`);
+        return res.status(400).send('Invalid configuration');
+    }
+
+    // Trigger background request
+    const seasonNum = season ? parseInt(season) : null;
+    const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
+
+    makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, reqType, userConfig)
+        .catch(err => console.error(`[BACKGROUND] Unhandled error: ${err.message}`));
+
+    // Set proper video headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+    
+    // CRITICAL FIX: Serve the video directly instead of redirecting
+    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
+    
+    if (fs.existsSync(localVideoPath)) {
+        console.log(`[VIDEO] Serving local video for ${mediaName}`);
+        // Set proper video headers
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Accept-Ranges', 'bytes');
+        
+        const stats = fs.statSync(localVideoPath);
+        const fileSize = stats.size;
+        
+        // Handle range requests for video streaming
+        const range = req.headers.range;
+        if (range) {
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const chunksize = (end - start) + 1;
+            
+            const file = fs.createReadStream(localVideoPath, { start, end });
+            const head = {
+                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': chunksize,
+                'Content-Type': 'video/mp4',
+            };
+            
+            res.writeHead(206, head);
+            file.pipe(res);
+        } else {
+            const head = {
+                'Content-Length': fileSize,
+                'Content-Type': 'video/mp4',
+            };
+            res.writeHead(200, head);
+            fs.createReadStream(localVideoPath).pipe(res);
+        }
+    } else {
+        console.log(`[VIDEO] Serving CDN video for ${mediaName}`);
+        // Fallback to CDN with proper streaming
+        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
+    }
+});
+
 // ─── Configured Manifest ───────────────────
 app.get("/configured/:config/manifest.json", (req, res) => {
     const { config } = req.params;
@@ -159,19 +226,16 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
 
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
 
-    // Set CORS headers for Stremio
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     try {
-        // Decode configuration
         const userConfig = decodeConfig(config);
         if (!userConfig) {
             console.log(`[STREAM] Invalid configuration`);
             return res.json({ streams: [] });
         }
 
-        // Parse the Stremio ID format
         const parsedId = parseStremioId(id, type);
         if (!parsedId) {
             console.log(`[STREAM] Unsupported ID format`);
@@ -218,11 +282,10 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
         let streams = [];
 
         if (type === 'movie') {
-            // Movie - single request option
             const videoUrl = `${SERVER_URL}/configured/${config}/video/movie/${tmdbId}?title=${encodeURIComponent(title)}`;
             
             streams.push(createStreamObject(
-                `Request Movie (Overseerr)`,
+                `Request "${title}" in Overseerr`,
                 videoUrl,
                 'movie',
                 tmdbId
@@ -231,21 +294,18 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
         } else if (type === 'series') {
             if (season !== null && episode !== null) {
                 // Episode page - show multiple options
-                
-                // Option 1: Request This Season
                 const seasonUrl = `${SERVER_URL}/configured/${config}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&season=${season}&request_type=season`;
                 streams.push(createStreamObject(
-                    `Request Season ${season} (Overseerr)`,
+                    `Request Season ${season} of "${title}"`,
                     seasonUrl,
                     'series',
                     tmdbId,
                     season
                 ));
 
-                // Option 2: Request Full Series
                 const seriesUrl = `${SERVER_URL}/configured/${config}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&season=${season}&request_type=series`;
                 streams.push(createStreamObject(
-                    `Request Full Series (Overseerr)`,
+                    `Request All Seasons of "${title}"`,
                     seriesUrl,
                     'series', 
                     tmdbId
@@ -254,7 +314,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
                 // Series overview page
                 const seriesUrl = `${SERVER_URL}/configured/${config}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&request_type=series`;
                 streams.push(createStreamObject(
-                    `Request Series (Overseerr)`,
+                    `Request "${title}" in Overseerr`,
                     seriesUrl,
                     'series',
                     tmdbId
@@ -274,41 +334,6 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// ─── Video Endpoint ───────
-app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
-    const { config, type, tmdbId } = req.params;
-    const { title, season, request_type } = req.query;
-    const mediaName = title || 'Unknown';
-
-    console.log(`[VIDEO] Video endpoint called for ${type} ${tmdbId} - ${mediaName}`,
-        season ? `Season ${season}` : '',
-        request_type ? `Type: ${request_type}` : ''
-    );
-
-    // Decode configuration
-    const userConfig = decodeConfig(config);
-    if (!userConfig) {
-        console.log(`[VIDEO] Invalid configuration`);
-        return res.status(400).send('Invalid configuration');
-    }
-
-    // Trigger background request (fire and forget)
-    const seasonNum = season ? parseInt(season) : null;
-    const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
-
-    makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, reqType, userConfig)
-        .catch(err => console.error(`[BACKGROUND] Unhandled error: ${err.message}`));
-
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
-
-    // Redirect to a waiting video
-    console.log(`[VIDEO] Redirecting to wait video for ${mediaName}`);
-    res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
-});
-
 // ─── Original Manifest ───────────────
 app.get("/manifest.json", (req, res) => {
     console.log(`[MANIFEST] Default manifest requested`);
@@ -324,6 +349,70 @@ app.get("/manifest.json", (req, res) => {
         catalogs: [],
         idPrefixes: ["tt"]
     });
+});
+
+// ─── Original Video Endpoint ────────────
+app.get("/video/:type/:tmdbId", async (req, res) => {
+    const { type, tmdbId } = req.params;
+    const { title, season, request_type } = req.query;
+    const mediaName = title || 'Unknown';
+
+    console.log(`[VIDEO] Default video endpoint for ${type} ${tmdbId} - ${mediaName}`);
+
+    // Only trigger if we have environment variables
+    if (process.env.OVERSEERR_URL && process.env.OVERSEERR_API) {
+        const seasonNum = season ? parseInt(season) : null;
+        const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
+
+        makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, reqType)
+            .catch(err => console.error(`[BACKGROUND] Unhandled error: ${err.message}`));
+    }
+
+    // Set proper video headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+    
+    // Serve video directly
+    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
+    
+    if (fs.existsSync(localVideoPath)) {
+        console.log(`[VIDEO] Serving local video for ${mediaName}`);
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Accept-Ranges', 'bytes');
+        
+        const stats = fs.statSync(localVideoPath);
+        const fileSize = stats.size;
+        
+        const range = req.headers.range;
+        if (range) {
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const chunksize = (end - start) + 1;
+            
+            const file = fs.createReadStream(localVideoPath, { start, end });
+            const head = {
+                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': chunksize,
+                'Content-Type': 'video/mp4',
+            };
+            
+            res.writeHead(206, head);
+            file.pipe(res);
+        } else {
+            const head = {
+                'Content-Length': fileSize,
+                'Content-Type': 'video/mp4',
+            };
+            res.writeHead(200, head);
+            fs.createReadStream(localVideoPath).pipe(res);
+        }
+    } else {
+        console.log(`[VIDEO] Serving CDN video for ${mediaName}`);
+        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
+    }
 });
 
 // ─── Original Stream Endpoint ───────
@@ -371,7 +460,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
         if (type === 'movie') {
             const videoUrl = `${SERVER_URL}/video/movie/${tmdbId}?title=${encodeURIComponent(title)}`;
             streams.push(createStreamObject(
-                `Request Movie (Overseerr)`,
+                `Request "${title}" in Overseerr`,
                 videoUrl,
                 'movie',
                 tmdbId
@@ -380,7 +469,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
             if (parsedId.season !== null) {
                 const seasonUrl = `${SERVER_URL}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&season=${parsedId.season}&request_type=season`;
                 streams.push(createStreamObject(
-                    `Request Season ${parsedId.season} (Overseerr)`,
+                    `Request Season ${parsedId.season} of "${title}"`,
                     seasonUrl,
                     'series',
                     tmdbId,
@@ -389,7 +478,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 
                 const seriesUrl = `${SERVER_URL}/video/series/${tmdbId}?title=${encodeURIComponent(title)}&season=${parsedId.season}&request_type=series`;
                 streams.push(createStreamObject(
-                    `Request Full Series (Overseerr)`,
+                    `Request All Seasons of "${title}"`,
                     seriesUrl,
                     'series',
                     tmdbId
@@ -406,29 +495,18 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// ─── Original Video Endpoint ────────────
-app.get("/video/:type/:tmdbId", async (req, res) => {
-    const { type, tmdbId } = req.params;
-    const { title, season, request_type } = req.query;
-    const mediaName = title || 'Unknown';
-
-    console.log(`[VIDEO] Default video endpoint for ${type} ${tmdbId} - ${mediaName}`);
-
-    // Only trigger if we have environment variables
-    if (process.env.OVERSEERR_URL && process.env.OVERSEERR_API) {
-        const seasonNum = season ? parseInt(season) : null;
-        const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
-
-        makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, reqType)
-            .catch(err => console.error(`[BACKGROUND] Unhandled error: ${err.message}`));
+// ─── Test video endpoint ────────
+app.get("/test-video", (req, res) => {
+    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
+    
+    if (fs.existsSync(localVideoPath)) {
+        console.log(`[TEST] Serving local test video`);
+        res.setHeader('Content-Type', 'video/mp4');
+        res.sendFile(localVideoPath);
+    } else {
+        console.log(`[TEST] Redirecting to CDN test video`);
+        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
     }
-
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
-
-    // Redirect to wait video
-    res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
 });
 
 // ─── Configuration Testing Endpoint ─────────────────
@@ -503,7 +581,7 @@ app.options('*', (req, res) => {
     res.sendStatus(200);
 });
 
-// ─── COMPLETE CONFIGURATION PAGE (FIXED) ────────────────────
+// ─── Configuration Page ────────────────────
 app.get("/", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -518,40 +596,26 @@ app.get("/", (req, res) => {
             .container { background: #1a1a1a; border-radius: 12px; padding: 30px; margin: 20px 0; border: 1px solid #333; }
             h1 { color: #8ef; margin-bottom: 10px; }
             h2 { color: #9f9; margin: 25px 0 15px 0; border-bottom: 1px solid #333; padding-bottom: 8px; }
-            h3 { color: #8ef; margin: 20px 0 10px 0; }
             .form-group { margin-bottom: 20px; }
             label { display: block; margin-bottom: 8px; font-weight: 600; color: #ccc; }
-            input, textarea { width: 100%; padding: 12px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; color: #fff; font-size: 14px; }
-            input:focus, textarea:focus { outline: none; border-color: #8ef; }
+            input { width: 100%; padding: 12px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; color: #fff; font-size: 14px; }
+            input:focus { outline: none; border-color: #8ef; }
             .btn { background: #28a745; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: 600; margin-right: 10px; margin-bottom: 10px; }
             .btn:hover { background: #34d058; }
-            .btn:disabled { background: #6c757d; cursor: not-allowed; }
             .btn-test { background: #17a2b8; }
             .btn-test:hover { background: #138496; }
             .help-text { color: #888; font-size: 12px; margin-top: 5px; }
             .success { background: #155724; color: #d4edda; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .error { background: #721c24; color: #f8d7da; padding: 12px; border-radius: 6px; margin: 15px 0; }
-            .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .addon-url { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; font-family: monospace; word-break: break-all; }
             .links { margin-top: 25px; padding-top: 20px; border-top: 1px solid #333; }
             .links a { color: #8ef; text-decoration: none; margin-right: 15px; display: inline-block; margin-bottom: 8px; }
-            .links a:hover { text-decoration: underline; }
-            .test-section { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; }
-            .test-result { margin: 10px 0; padding: 10px; border-radius: 4px; }
-            .test-success { background: #155724; color: #d4edda; }
-            .test-error { background: #721c24; color: #f8d7da; }
-            .loading { color: #17a2b8; }
-            .video-tests { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
-            .video-test-item { background: #2a2a2a; padding: 15px; border-radius: 6px; text-align: center; }
-            @media (max-width: 600px) {
-                .video-tests { grid-template-columns: 1fr; }
-            }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🎬 Stremio Overseerr Addon</h1>
-            <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
+            <p>Configure your personal addon instance. Your settings are encoded in the addon URL.</p>
 
             <form id="configForm">
                 <h2>🔑 API Configuration</h2>
@@ -559,19 +623,19 @@ app.get("/", (req, res) => {
                 <div class="form-group">
                     <label for="tmdbKey">TMDB API Key *</label>
                     <input type="text" id="tmdbKey" name="tmdbKey" required placeholder="Enter your TMDB API key">
-                    <div class="help-text">Get your free API key from: https://www.themoviedb.org/settings/api</div>
+                    <div class="help-text">Get from: https://www.themoviedb.org/settings/api</div>
                 </div>
 
                 <div class="form-group">
                     <label for="overseerrUrl">Overseerr URL *</label>
-                    <input type="text" id="overseerrUrl" name="overseerrUrl" required placeholder="https://overseerr.example.com or http://192.168.1.100:5055">
-                    <div class="help-text">Your Overseerr instance URL (include http:// or https://)</div>
+                    <input type="text" id="overseerrUrl" name="overseerrUrl" required placeholder="https://overseerr.example.com">
+                    <div class="help-text">Your Overseerr instance URL</div>
                 </div>
 
                 <div class="form-group">
                     <label for="overseerrApi">Overseerr API Key *</label>
                     <input type="text" id="overseerrApi" name="overseerrApi" required placeholder="Enter your Overseerr API key">
-                    <div class="help-text">Get from Overseerr: Settings → API Keys → Generate New API Key</div>
+                    <div class="help-text">Get from Overseerr: Settings → API Keys</div>
                 </div>
 
                 <button type="button" class="btn" onclick="generateAddon()">Generate Addon URL</button>
@@ -581,7 +645,7 @@ app.get("/", (req, res) => {
             <div id="result" style="display: none;">
                 <h2>📦 Your Addon URL</h2>
                 <div class="addon-url" id="addonUrl"></div>
-                <p><strong>Copy this URL and install it in Stremio:</strong></p>
+                <p><strong>Install in Stremio:</strong></p>
                 <ol>
                     <li>Open Stremio</li>
                     <li>Click the puzzle piece icon (Addons)</li>
@@ -592,140 +656,83 @@ app.get("/", (req, res) => {
                 <button class="btn btn-test" onclick="copyToClipboard()">Copy URL</button>
             </div>
 
-            <div class="test-section">
-                <h3>🧪 Test Your Configuration</h3>
-                <p>Test if your API keys and URLs are working correctly:</p>
-                <button class="btn btn-test" onclick="testConfiguration()">Test Configuration</button>
-                <div id="testResults" style="margin-top: 10px;"></div>
-            </div>
-
-            <h3>🎬 Video Playback Tests</h3>
-            <p>Test if the video playback works in your browser (required for Stremio):</p>
-
-            <div class="video-tests">
-                <div class="video-test-item">
-                    <h4>Direct Video Test</h4>
-                    <p>Test basic video streaming</p>
-                    <a href="/test-video" target="_blank" class="btn btn-test">Test Video Playback</a>
-                </div>
-                <div class="video-test-item">
-                    <h4>Movie Request Test</h4>
-                    <p>Test movie request flow</p>
-                    <a href="/video/movie/550?title=Test%20Movie" target="_blank" class="btn btn-test">Test Movie Request</a>
-                </div>
-                <div class="video-test-item">
-                    <h4>Season Request Test</h4>
-                    <p>Test TV season request</p>
-                    <a href="/video/series/1399?title=Game%20of%20Thrones&season=1&request_type=season" target="_blank" class="btn btn-test">Test Season Request</a>
-                </div>
-                <div class="video-test-item">
-                    <h4>Series Request Test</h4>
-                    <p>Test full series request</p>
-                    <a href="/video/series/1399?title=Game%20of%20Thrones&season=1&request_type=series" target="_blank" class="btn btn-test">Test Series Request</a>
-                </div>
-            </div>
+            <div id="testResults" style="margin-top: 20px;"></div>
 
             <div class="links">
-                <h3>🔗 Quick Links</h3>
-                <a href="/health">❤️ Health Check</a>
-                <a href="/test-video">🎬 Test Video Playback</a>
-                <a href="/stream/movie/tt0133093.json">🎬 Test Movie Stream (Matrix)</a>
-                <a href="/stream/series/tt0944947:1:1.json">📺 Test TV Episode Stream (GoT S1E1)</a>
-                <a href="/manifest.json">📋 Manifest File</a>
-                <a href="https://github.com/ericvlog/stremio-overseerr-addon" target="_blank">📚 GitHub Repository</a>
+                <h3>🔗 Quick Tests</h3>
+                <a href="/test-video" target="_blank">🎬 Test Video</a>
+                <a href="/stream/movie/tt0133093.json" target="_blank">🎬 Test Movie Stream</a>
+                <a href="/stream/series/tt0944947:1:1.json" target="_blank">📺 Test TV Stream</a>
+                <a href="/health" target="_blank">❤️ Health Check</a>
             </div>
         </div>
 
         <script>
             async function testConfiguration() {
-                const form = document.getElementById('configForm');
-                const formData = new FormData(form);
-
                 const config = {
-                    tmdbKey: formData.get('tmdbKey'),
-                    overseerrUrl: formData.get('overseerrUrl'),
-                    overseerrApi: formData.get('overseerrApi')
+                    tmdbKey: document.getElementById('tmdbKey').value,
+                    overseerrUrl: document.getElementById('overseerrUrl').value,
+                    overseerrApi: document.getElementById('overseerrApi').value
                 };
 
                 if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
-                    document.getElementById('testResults').innerHTML = '<div class="error">Please fill in all fields first</div>';
+                    document.getElementById('testResults').innerHTML = '<div class="error">Please fill in all fields</div>';
                     return;
                 }
 
-                document.getElementById('testResults').innerHTML = '<div class="loading">Testing configuration... (this may take a few seconds)</div>';
-
-                const testButton = document.querySelector('.test-section .btn');
-                testButton.disabled = true;
-                testButton.textContent = 'Testing...';
+                document.getElementById('testResults').innerHTML = '<div class="success">Testing configuration...</div>';
 
                 try {
                     const response = await fetch('/api/test-configuration', {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(config)
                     });
 
                     const result = await response.json();
-
                     let html = '';
+                    
                     if (result.success) {
-                        html += '<div class="success">✅ All tests passed! Your configuration is working correctly.</div>';
+                        html += '<div class="success">✅ All tests passed! Configuration is working.</div>';
                     } else {
-                        html += '<div class="error">❌ Some tests failed. Please check your configuration.</div>';
+                        html += '<div class="error">❌ Some tests failed.</div>';
                     }
 
                     result.results.forEach(test => {
                         const icon = test.status === 'success' ? '✅' : '❌';
-                        const className = test.status === 'success' ? 'test-success' : 'test-error';
-                        html += '<div class="test-result ' + className + '">' + icon + ' <strong>' + test.service + ':</strong> ' + test.message + '</div>';
+                        html += '<div>' + icon + ' <strong>' + test.service + ':</strong> ' + test.message + '</div>';
                     });
 
                     document.getElementById('testResults').innerHTML = html;
 
                 } catch (error) {
                     document.getElementById('testResults').innerHTML = '<div class="error">❌ Test failed: ' + error.message + '</div>';
-                } finally {
-                    testButton.disabled = false;
-                    testButton.textContent = 'Test Configuration';
                 }
             }
 
             function generateAddon() {
-                const form = document.getElementById('configForm');
-                const formData = new FormData(form);
-
                 const config = {
-                    tmdbKey: formData.get('tmdbKey'),
-                    overseerrUrl: formData.get('overseerrUrl'),
-                    overseerrApi: formData.get('overseerrApi')
+                    tmdbKey: document.getElementById('tmdbKey').value,
+                    overseerrUrl: document.getElementById('overseerrUrl').value,
+                    overseerrApi: document.getElementById('overseerrApi').value
                 };
 
-                // Basic validation
                 if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
-                    alert('Please fill in all required fields');
+                    alert('Please fill all fields');
                     return;
                 }
 
-                // Encode configuration to base64
                 const configJson = JSON.stringify(config);
                 const configBase64 = btoa(unescape(encodeURIComponent(configJson)));
-
-                // Generate addon URL
                 const addonUrl = window.location.origin + '/configured/' + configBase64 + '/manifest.json';
 
-                // Display result
                 document.getElementById('addonUrl').textContent = addonUrl;
                 document.getElementById('result').style.display = 'block';
-
-                // Store for installation
                 window.generatedAddonUrl = addonUrl;
             }
 
             function installInStremio() {
                 if (window.generatedAddonUrl) {
-                    // Use stremio protocol to install directly
                     const stremioUrl = 'stremio://' + window.generatedAddonUrl.replace(/^https?:\\/\\//, '');
                     window.location.href = stremioUrl;
                 }
@@ -733,18 +740,10 @@ app.get("/", (req, res) => {
 
             function copyToClipboard() {
                 if (window.generatedAddonUrl) {
-                    navigator.clipboard.writeText(window.generatedAddonUrl).then(function() {
-                        alert('Addon URL copied to clipboard!');
-                    }, function(err) {
-                        console.error('Could not copy text: ', err);
-                    });
+                    navigator.clipboard.writeText(window.generatedAddonUrl);
+                    alert('URL copied to clipboard!');
                 }
             }
-
-            // Auto-focus first input
-            document.addEventListener('DOMContentLoaded', function() {
-                document.getElementById('tmdbKey').focus();
-            });
         </script>
     </body>
     </html>
@@ -753,23 +752,12 @@ app.get("/", (req, res) => {
     res.send(html);
 });
 
-// ─── Test video endpoint ────────
-app.get("/test-video", (req, res) => {
-    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
-    
-    if (fs.existsSync(localVideoPath)) {
-        res.sendFile(localVideoPath);
-    } else {
-        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
-    }
-});
-
 // ─── Start Server ───────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Stremio Overseerr Addon running at: ${SERVER_URL}`);
     console.log(`🎬 Configuration page: ${SERVER_URL}/`);
-    console.log(`📋 User-specific addons: ${SERVER_URL}/configured/{config}/manifest.json`);
-    console.log(`🎬 Test movie: ${SERVER_URL}/stream/movie/tt0133093.json`);
-    console.log(`📺 Test TV: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
-    console.log(`🚀 Vercel Serverless Ready`);
+    console.log(`🎬 Test video: ${SERVER_URL}/test-video`);
+    console.log(`🎬 Test movie stream: ${SERVER_URL}/stream/movie/tt0133093.json`);
+    console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
+    console.log(`🚀 Vercel Serverless Ready with FIXED video streaming`);
 });
