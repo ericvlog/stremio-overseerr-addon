@@ -361,8 +361,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
 
-        // ✅ FIXED: Trigger Overseerr request in background when stream is loaded
-        // This happens when Stremio loads the stream for playback
+        // Only trigger Overseerr request when stream is actually played
         const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
         
         if (!pendingRequests.has(requestKey)) {
@@ -373,69 +372,34 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             const seasonNum = season ? parseInt(season) : null;
             const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
 
-            // Make the request immediately but don't block response
-            (async () => {
-                try {
-                    console.log(`[OVERSEERR] 🔄 Making immediate request for "${title}"`);
-                    console.log(`[OVERSEERR] Request details:`, {
-                        tmdbId,
-                        type,
-                        title,
-                        seasonNum,
-                        reqType
-                    });
-                    
-                    const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
-                    
-                    if (result.success) {
-                        console.log(`[OVERSEERR] ✅ Request successful for "${title}"`);
-                        console.log(`[OVERSEERR] Request ID: ${result.requestId}`);
-                        console.log(`[OVERSEERR] Full response:`, JSON.stringify(result.data, null, 2));
-                        
-                        // Keep track of successful request with more details
-                        global.lastSuccessfulRequest = {
-                            title,
-                            requestId: result.requestId,
-                            tmdbId,
-                            type,
-                            seasonNum,
-                            timestamp: new Date().toISOString(),
-                            response: result.data
-                        };
-                        
-                        // Log success message that will be visible in the video
-                        console.log(`[OVERSEERR] ✨ Successfully requested "${title}" in Overseerr!`);
-                    } else {
-                        console.error(`[OVERSEERR] ❌ Request failed for "${title}"`);
-                        console.error(`[OVERSEERR] Status:`, result.status);
-                        console.error(`[OVERSEERR] Error:`, result.error);
-                        console.error(`[OVERSEERR] Full error details:`, JSON.stringify(result, null, 2));
-                        throw new Error(result.error || 'Unknown error occurred');
-                    }
-                } catch (error) {
-                    console.error(`[OVERSEERR] ❌ Request error for "${title}"`);
-                    console.error(`[OVERSEERR] Error message:`, error.message);
-                    console.error(`[OVERSEERR] Stack trace:`, error.stack);
-                    
-                    // Keep track of failed request with more details
-                    global.lastFailedRequest = {
-                        title,
-                        tmdbId,
-                        type,
-                        seasonNum,
-                        error: error.message,
-                        stack: error.stack,
-                        timestamp: new Date().toISOString()
-                    };
-                    
-                    // Log error message that will be visible in the video
-                    console.error(`[OVERSEERR] ❌ Failed to request "${title}" in Overseerr. Check server logs.`);
-                } finally {
-                    // Clean up pending request and log completion
-                    pendingRequests.delete(requestKey);
-                    console.log(`[OVERSEERR] 🏁 Request processing completed for "${title}"`);
+            // Make the request only when the stream is loaded
+            try {
+                console.log(`[OVERSEERR] 🔄 Making immediate request for "${title}"`);
+                console.log(`[OVERSEERR] Request details:`, {
+                    tmdbId,
+                    type,
+                    title,
+                    seasonNum,
+                    reqType
+                });
+                
+                const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                
+                if (result.success) {
+                    console.log(`[OVERSEERR] ✅ Request successful for "${title}"`);
+                    console.log(`[OVERSEERR] Request ID: ${result.requestId}`);
+                } else {
+                    console.error(`[OVERSEERR] ❌ Request failed for "${title}": ${result.error}`);
                 }
-            })();
+            } catch (error) {
+                console.error(`[OVERSEERR] ❌ Request error for "${title}": ${error.message}`);
+            } finally {
+                pendingRequests.delete(requestKey);
+                console.log(`[OVERSEERR] 🏁 Request processing completed for "${title}"`);
+            }
+        } else {
+            console.log(`[BACKGROUND] Request already pending for: "${title}"`);
+        }
         } else {
             console.log(`[BACKGROUND] Request already pending for: "${title}"`);
         }
