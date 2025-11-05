@@ -183,26 +183,29 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
 
 // ─── STREAM FORMAT USING YOUR WAIT.MP4 ──────────────────
 function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
+    // Using a longer wait video (30 seconds) to ensure request completes
+    const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait-long.mp4";
 
     let streamTitle;
     if (type === 'movie') {
-        streamTitle = `Request "${title}"`;
+        streamTitle = `Requesting "${title}" in Overseerr...`;
     } else if (season && episode) {
-        streamTitle = `Request S${season}E${episode} of "${title}"`;
+        streamTitle = `Requesting S${season}E${episode} of "${title}" in Overseerr...`;
     } else if (season) {
-        streamTitle = `Request Season ${season} of "${title}"`;
+        streamTitle = `Requesting Season ${season} of "${title}" in Overseerr...`;
     } else {
-        streamTitle = `Request "${title}"`;
+        streamTitle = `Requesting "${title}" in Overseerr...`;
     }
 
     return {
-        name: "Overseerr",
+        name: "Overseerr Request",
         title: streamTitle,
         url: waitVideoUrl,
         behaviorHints: {
             notWebReady: false,
-            bingeGroup: `overseerr-${type}-${tmdbId}`
+            bingeGroup: `overseerr-${type}-${tmdbId}`,
+            // Set longer duration to ensure request completes
+            runtime: "30 mins"
         }
     };
 }
@@ -326,32 +329,63 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             (async () => {
                 try {
                     console.log(`[OVERSEERR] 🔄 Making immediate request for "${title}"`);
+                    console.log(`[OVERSEERR] Request details:`, {
+                        tmdbId,
+                        type,
+                        title,
+                        seasonNum,
+                        reqType
+                    });
+                    
                     const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                    
                     if (result.success) {
-                        console.log(`[OVERSEERR] ✅ Request successful for "${title}" - ID: ${result.requestId}`);
-                        // Keep track of successful request
+                        console.log(`[OVERSEERR] ✅ Request successful for "${title}"`);
+                        console.log(`[OVERSEERR] Request ID: ${result.requestId}`);
+                        console.log(`[OVERSEERR] Full response:`, JSON.stringify(result.data, null, 2));
+                        
+                        // Keep track of successful request with more details
                         global.lastSuccessfulRequest = {
                             title,
                             requestId: result.requestId,
-                            timestamp: new Date().toISOString()
+                            tmdbId,
+                            type,
+                            seasonNum,
+                            timestamp: new Date().toISOString(),
+                            response: result.data
                         };
+                        
+                        // Log success message that will be visible in the video
+                        console.log(`[OVERSEERR] ✨ Successfully requested "${title}" in Overseerr!`);
                     } else {
                         console.error(`[OVERSEERR] ❌ Request failed for "${title}"`);
-                        console.error(`[OVERSEERR] Error details:`, result.error);
-                        throw new Error(result.error);
+                        console.error(`[OVERSEERR] Status:`, result.status);
+                        console.error(`[OVERSEERR] Error:`, result.error);
+                        console.error(`[OVERSEERR] Full error details:`, JSON.stringify(result, null, 2));
+                        throw new Error(result.error || 'Unknown error occurred');
                     }
                 } catch (error) {
                     console.error(`[OVERSEERR] ❌ Request error for "${title}"`);
-                    console.error(`[OVERSEERR] Full error:`, error);
-                    // Keep track of failed request
+                    console.error(`[OVERSEERR] Error message:`, error.message);
+                    console.error(`[OVERSEERR] Stack trace:`, error.stack);
+                    
+                    // Keep track of failed request with more details
                     global.lastFailedRequest = {
                         title,
+                        tmdbId,
+                        type,
+                        seasonNum,
                         error: error.message,
+                        stack: error.stack,
                         timestamp: new Date().toISOString()
                     };
+                    
+                    // Log error message that will be visible in the video
+                    console.error(`[OVERSEERR] ❌ Failed to request "${title}" in Overseerr. Check server logs.`);
                 } finally {
-                    // Clean up pending request
+                    // Clean up pending request and log completion
                     pendingRequests.delete(requestKey);
+                    console.log(`[OVERSEERR] 🏁 Request processing completed for "${title}"`);
                 }
             })();
         } else {
