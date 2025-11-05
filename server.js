@@ -400,7 +400,6 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
         } else {
             console.log(`[BACKGROUND] Request already pending for: "${title}"`);
         }
-        }
 
         res.json({
             streams: streams
