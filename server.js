@@ -64,76 +64,33 @@ function decodeConfig(configString) {
     }
 }
 
-// ─── TORRENTIO-STYLE STREAM FORMAT ──────────────────
+// ─── SIMPLIFIED STREMIO STREAM FORMAT ──────────────────
 function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    // TORRENTIO APPROACH: Return external URLs that Stremio can play directly
-    // These are real video URLs that Stremio can stream
-    
+    // Use reliable public domain video URLs that work in Stremio
     const streamUrls = [
-        // Public domain video URLs that actually work in Stremio
         "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4", 
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
+        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
     ];
 
-    // Randomly select a working video URL (like Torrentio does with different torrents)
     const randomUrl = streamUrls[Math.floor(Math.random() * streamUrls.length)];
     
-    // Build stream title based on type
     let streamTitle;
     if (type === 'movie') {
-        streamTitle = `📥 Request "${title}" in Overseerr`;
+        streamTitle = `Request "${title}" in Overseerr`;
     } else if (season && episode) {
-        streamTitle = `📥 Request S${season}E${episode} of "${title}" in Overseerr`;
+        streamTitle = `Request S${season}E${episode} of "${title}"`;
     } else if (season) {
-        streamTitle = `📥 Request Season ${season} of "${title}" in Overseerr`;
+        streamTitle = `Request Season ${season} of "${title}"`;
     } else {
-        streamTitle = `📥 Request "${title}" in Overseerr`;
+        streamTitle = `Request "${title}" in Overseerr`;
     }
 
-    // TORRENTIO-STREAM FORMAT (what actually works in Stremio)
+    // SIMPLIFIED stream format that works in Stremio
     return {
-        name: "Overseerr", // Display name in Stremio
-        title: streamTitle, // Stream title shown to user
-        url: randomUrl, // ACTUAL PLAYABLE VIDEO URL
-        
-        // TORRENTIO USES THESE FIELDS:
-        behaviorHints: {
-            // These hints tell Stremio how to handle the stream
-            notWebReady: false, // IMPORTANT: This is a playable stream
-            bingeGroup: `overseerr-${type}-${tmdbId}`,
-            // Torrentio uses these to group similar streams
-            country: "US",
-            // Indicate this is a video stream, not a web page
-            headers: {
-                "User-Agent": "Stremio/4.0"
-            }
-        },
-        
-        // Additional metadata that helps Stremio
-        type: "movie", // This tells Stremio it's a video stream
-        description: `This will request "${title}" in your Overseerr instance`,
-        
-        // Torrentio-style info
-        infoHash: `overseerr-${tmdbId}-${Date.now()}`,
-        fileIdx: 0,
-        sources: ["overseerr"],
-        
-        // Video quality info (like Torrentio shows)
-        quality: "1080p",
-        videoCodec: "h264",
-        audioChannels: 2,
-        
-        // Stremio expects these for external streams
-        externalUrl: randomUrl,
-        ytId: null
+        name: "Overseerr",
+        title: streamTitle,
+        url: randomUrl
     };
 }
 
@@ -176,8 +133,6 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
         if (response.ok) {
             const data = await response.json();
             console.log(`[BACKGROUND] ✅ Success: ${mediaName} - Request ID: ${data.id}`);
-            
-            // Store successful request for tracking
             return { success: true, requestId: data.id };
         } else {
             const errorText = await response.text();
@@ -190,7 +145,7 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
     }
 }
 
-// ─── TORRENTIO-STYLE: Trigger request when stream is selected ───────
+// ─── Request Trigger Endpoint ───────
 app.get("/configured/:config/request/:type/:tmdbId", async (req, res) => {
     const { config, type, tmdbId } = req.params;
     const { title, season, request_type } = req.query;
@@ -198,14 +153,11 @@ app.get("/configured/:config/request/:type/:tmdbId", async (req, res) => {
 
     console.log(`[REQUEST-TRIGGER] User selected stream for ${type} ${tmdbId} - ${mediaName}`);
 
-    // Decode configuration
     const userConfig = decodeConfig(config);
     if (!userConfig) {
-        console.log(`[REQUEST-TRIGGER] Invalid configuration`);
         return res.json({ success: false, error: "Invalid configuration" });
     }
 
-    // Make the Overseerr request
     const seasonNum = season ? parseInt(season) : null;
     const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
 
@@ -213,21 +165,18 @@ app.get("/configured/:config/request/:type/:tmdbId", async (req, res) => {
         const result = await makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, reqType, userConfig);
         
         if (result.success) {
-            console.log(`[REQUEST-TRIGGER] ✅ Request submitted for ${mediaName}`);
             res.json({ 
                 success: true, 
                 message: `Request for "${mediaName}" submitted to Overseerr!`,
                 requestId: result.requestId
             });
         } else {
-            console.log(`[REQUEST-TRIGGER] ❌ Request failed for ${mediaName}`);
             res.json({ 
                 success: false, 
                 error: `Failed to submit request: ${result.error}` 
             });
         }
     } catch (error) {
-        console.error(`[REQUEST-TRIGGER] ❌ Error: ${error.message}`);
         res.json({ 
             success: false, 
             error: `Request error: ${error.message}` 
@@ -251,14 +200,11 @@ app.get("/configured/:config/manifest.json", (req, res) => {
         resources: ["stream"],
         types: ["movie", "series"],
         catalogs: [],
-        idPrefixes: ["tt"],
-        background: "https://i.imgur.com/7U2j0aB.png",
-        logo: "https://i.imgur.com/7U2j0aB.png",
-        contactEmail: "support@example.com"
+        idPrefixes: ["tt"]
     });
 });
 
-// ─── Configured Stream Endpoint (TORRENTIO-STYLE) ───
+// ─── Configured Stream Endpoint ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
 
@@ -316,56 +262,23 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // TORRENTIO APPROACH: Return multiple stream options with REAL video URLs
+        // Build streams array
         let streams = [];
 
         if (type === 'movie') {
-            // For movies: Single request option that plays a video AND triggers the request
-            streams.push(createStreamObject(
-                title,
-                'movie',
-                tmdbId
-            ));
-
+            streams.push(createStreamObject(title, 'movie', tmdbId));
         } else if (type === 'series') {
             if (season !== null && episode !== null) {
-                // Episode page - multiple options
-                
-                // Option 1: Request This Season
-                streams.push(createStreamObject(
-                    title,
-                    'series',
-                    tmdbId,
-                    season,
-                    episode
-                ));
-
-                // Option 2: Request Full Series  
-                streams.push(createStreamObject(
-                    title,
-                    'series', 
-                    tmdbId,
-                    null, // No specific season for full series
-                    null
-                ));
+                streams.push(createStreamObject(title, 'series', tmdbId, season, episode));
             } else {
-                // Series overview page
-                streams.push(createStreamObject(
-                    title,
-                    'series',
-                    tmdbId
-                ));
+                streams.push(createStreamObject(title, 'series', tmdbId));
             }
         }
 
-        console.log(`[STREAM] Returning ${streams.length} TORRENTIO-STYLE stream(s) for: ${title}`);
+        console.log(`[STREAM] Returning ${streams.length} stream(s) for: ${title}`);
         
-        // TORRENTIO RESPONSE FORMAT
         res.json({ 
-            streams: streams,
-            cacheMaxAge: 3600, // Cache for 1 hour
-            staleRevalidate: 3600,
-            staleError: 86400
+            streams: streams
         });
 
     } catch (error) {
@@ -383,13 +296,11 @@ app.get("/manifest.json", (req, res) => {
         id: "org.stremio.overseerr",
         version: "1.0.0", 
         name: "Overseerr Requests",
-        description: "Request movies and shows through Overseerr - configure your instance",
+        description: "Request movies and shows through Overseerr",
         resources: ["stream"],
         types: ["movie", "series"],
         catalogs: [],
-        idPrefixes: ["tt"],
-        background: "https://i.imgur.com/7U2j0aB.png",
-        logo: "https://i.imgur.com/7U2j0aB.png"
+        idPrefixes: ["tt"]
     });
 });
 
@@ -436,20 +347,10 @@ app.get("/stream/:type/:id.json", async (req, res) => {
         let streams = [];
 
         if (type === 'movie') {
-            streams.push(createStreamObject(
-                title,
-                'movie',
-                tmdbId
-            ));
+            streams.push(createStreamObject(title, 'movie', tmdbId));
         } else if (type === 'series') {
             if (parsedId.season !== null) {
-                streams.push(createStreamObject(
-                    title,
-                    'series',
-                    tmdbId,
-                    parsedId.season,
-                    parsedId.episode
-                ));
+                streams.push(createStreamObject(title, 'series', tmdbId, parsedId.season, parsedId.episode));
             }
         }
 
@@ -459,6 +360,22 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     } catch (error) {
         console.error('[STREAM] Error:', error.message);
         res.json({ streams: [] });
+    }
+});
+
+// ─── Test video endpoint ────────
+app.get("/test-video", (req, res) => {
+    console.log(`[TEST] Test video requested`);
+    
+    const localVideoPath = path.join(__dirname, "public", "wait.mp4");
+    
+    if (fs.existsSync(localVideoPath)) {
+        console.log(`[TEST] Serving local video`);
+        res.setHeader('Content-Type', 'video/mp4');
+        res.sendFile(localVideoPath);
+    } else {
+        console.log(`[TEST] Redirecting to CDN video`);
+        res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
     }
 });
 
@@ -522,8 +439,7 @@ app.get("/health", (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Vercel Serverless Ready',
-        version: '1.0.0',
-        approach: 'TORRENTIO-STYLE EXTERNAL STREAMS'
+        version: '1.0.0'
     });
 });
 
@@ -564,18 +480,12 @@ app.get("/", (req, res) => {
             .addon-url { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; font-family: monospace; word-break: break-all; }
             .links { margin-top: 25px; padding-top: 20px; border-top: 1px solid #333; }
             .links a { color: #8ef; text-decoration: none; margin-right: 15px; display: inline-block; margin-bottom: 8px; }
-            .info-box { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🎬 Stremio Overseerr Addon</h1>
             <p>Configure your personal addon instance. Your settings are encoded in the addon URL.</p>
-
-            <div class="info-box">
-                <h3>🚀 NEW: Torrentio-Style Streaming</h3>
-                <p>This addon now uses external video streams (like Torrentio) that actually play in Stremio while triggering your Overseerr requests in the background.</p>
-            </div>
 
             <form id="configForm">
                 <h2>🔑 API Configuration</h2>
@@ -620,6 +530,7 @@ app.get("/", (req, res) => {
 
             <div class="links">
                 <h3>🔗 Quick Tests</h3>
+                <a href="/test-video" target="_blank">🎬 Test Video</a>
                 <a href="/stream/movie/tt0133093.json" target="_blank">🎬 Test Movie Stream (Matrix)</a>
                 <a href="/stream/series/tt0944947:1:1.json" target="_blank">📺 Test TV Stream (GoT S1E1)</a>
                 <a href="/health" target="_blank">❤️ Health Check</a>
@@ -716,8 +627,8 @@ app.get("/", (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Stremio Overseerr Addon running at: ${SERVER_URL}`);
     console.log(`🎬 Configuration page: ${SERVER_URL}/`);
+    console.log(`🎬 Test video: ${SERVER_URL}/test-video`);
     console.log(`🎬 Test movie stream: ${SERVER_URL}/stream/movie/tt0133093.json`);
     console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
-    console.log(`🚀 TORRENTIO-STYLE: Using external video streams that actually play in Stremio`);
-    console.log(`🎯 Streams will play actual videos while triggering Overseerr requests`);
+    console.log(`🚀 Server ready - using simplified stream format`);
 });
