@@ -135,17 +135,27 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
         console.log(`[OVERSEERR] Sending to: ${normalizedUrl}/api/v1/request`);
         console.log(`[OVERSEERR] Request body:`, JSON.stringify(requestBody));
 
+        // Allow insecure HTTPS and handle both HTTP/HTTPS
+        const fetchOptions = {
+            method: 'POST',
+            headers: {
+                'X-Api-Key': overseerrApi,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Stremio-Overseerr-Addon/1.0.0'
+            },
+            body: JSON.stringify(requestBody)
+        };
+
+        // Add node-fetch specific options for handling self-signed certs
+        if (normalizedUrl.startsWith('https://')) {
+            fetchOptions.agent = new (await import('https')).Agent({
+                rejectUnauthorized: false
+            });
+        }
+
         const response = await fetch(
             `${normalizedUrl}/api/v1/request`,
-            {
-                method: 'POST',
-                headers: {
-                    'X-Api-Key': overseerrApi,
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Stremio-Overseerr-Addon/1.0.0'
-                },
-                body: JSON.stringify(requestBody)
-            }
+            fetchOptions
         );
 
         console.log(`[OVERSEERR] Response status: ${response.status} ${response.statusText}`);
@@ -183,8 +193,8 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
 
 // ─── STREAM FORMAT USING YOUR WAIT.MP4 ──────────────────
 function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    // Using a longer wait video (30 seconds) to ensure request completes
-    const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait-long.mp4";
+    // Using a reliable test video source
+    const waitVideoUrl = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
     let streamTitle;
     if (type === 'movie') {
@@ -482,7 +492,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 // ─── Test Video Endpoint (Your wait.mp4) ────────
 app.get("/test-video", (req, res) => {
     console.log(`[TEST] Test video requested`);
-    res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+    res.redirect("http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4");
 });
 
 // ─── Health Check ──────────────────
