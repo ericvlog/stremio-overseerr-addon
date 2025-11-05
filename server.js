@@ -358,69 +358,21 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Make the Overseerr request first
-        const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
-        
-        if (!pendingRequests.has(requestKey)) {
-            pendingRequests.add(requestKey);
-            
-            console.log(`[OVERSEERR] 🔄 Making request for "${title}"`);
-            
-            const seasonNum = season ? parseInt(season) : null;
-            const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
-
-            try {
-                const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
-                
-                if (result.success) {
-                    console.log(`[OVERSEERR] ✅ Request successful for "${title}"`);
-                    console.log(`[OVERSEERR] Request ID: ${result.requestId}`);
-                } else {
-                    console.error(`[OVERSEERR] ❌ Request failed for "${title}": ${result.error}`);
-                }
-            } catch (error) {
-                console.error(`[OVERSEERR] ❌ Request error for "${title}": ${error.message}`);
-            } finally {
-                pendingRequests.delete(requestKey);
-                console.log(`[OVERSEERR] 🏁 Request processing completed for "${title}"`);
-            }
-        } else {
-            console.log(`[OVERSEERR] Request already pending for: "${title}"`);
-        }
-
-        // Return a stream that just plays the video
+        // Return stream objects that point to the test-video URL on this server.
+        // The actual Overseerr request will be performed when the /test-video URL is fetched (i.e. when the user starts playback).
         let streams = [];
-        const videoUrl = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
         if (type === 'movie') {
-            streams.push({
-                name: "Request Submitted",
-                title: `Request submitted for "${title}"`,
-                url: videoUrl,
-                behaviorHints: {
-                    notWebReady: false,
-                    bingeGroup: `overseerr-${type}-${tmdbId}`,
-                    runtime: "30 mins"
-                }
-            });
+            streams.push(createStreamObject(title, 'movie', tmdbId, null, null, config));
         } else if (type === 'series') {
-            const episodeString = season && episode ? ` S${season}E${episode}` : '';
-            streams.push({
-                name: "Request Submitted",
-                title: `Request submitted for "${title}${episodeString}"`,
-                url: videoUrl,
-                behaviorHints: {
-                    notWebReady: false,
-                    bingeGroup: `overseerr-${type}-${tmdbId}`,
-                    runtime: "30 mins"
-                }
-            });
+            if (season !== null && episode !== null) {
+                streams.push(createStreamObject(title, 'series', tmdbId, season, episode, config));
+            } else {
+                streams.push(createStreamObject(title, 'series', tmdbId, null, null, config));
+            }
         }
 
-        // Only return the stream object, no request is made here
-        res.json({
-            streams: streams
-        });
+        res.json({ streams: streams });
 
     } catch (error) {
         console.error('[STREAM] Error:', error.message);
@@ -464,8 +416,47 @@ app.get("/stream/:type/:id.json", (req, res) => {
 });
 
 // ─── Test Video Endpoint ────────
+// ─── Test Video Endpoint with Overseerr Request ────────
 app.get("/test-video", async (req, res) => {
-    console.log(`[TEST] Test video requested`);
+    console.log(`[TEST] Test video requested with Overseerr processing`);
+    
+    // Extract request parameters from query
+    const { config, type, tmdbId, title, season, episode } = req.query;
+    
+    if (config && type && tmdbId && title) {
+        const userConfig = decodeConfig(config);
+        if (userConfig) {
+            const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
+            
+            if (!pendingRequests.has(requestKey)) {
+                pendingRequests.add(requestKey);
+                
+                console.log(`[OVERSEERR] 🔄 Making request for "${title}"`);
+                
+                const seasonNum = season ? parseInt(season) : null;
+                const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+
+                try {
+                    const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                    
+                    if (result.success) {
+                        console.log(`[OVERSEERR] ✅ Request successful for "${title}"`);
+                        console.log(`[OVERSEERR] Request ID: ${result.requestId}`);
+                    } else {
+                        console.error(`[OVERSEERR] ❌ Request failed for "${title}": ${result.error}`);
+                    }
+                } catch (error) {
+                    console.error(`[OVERSEERR] ❌ Request error for "${title}": ${error.message}`);
+                } finally {
+                    pendingRequests.delete(requestKey);
+                    console.log(`[OVERSEERR] 🏁 Request processing completed for "${title}"`);
+                }
+            } else {
+                console.log(`[OVERSEERR] Request already pending for: "${title}"`);
+            }
+        }
+    }
+
     res.redirect("http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4");
 });
 
