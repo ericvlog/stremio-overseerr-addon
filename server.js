@@ -19,10 +19,7 @@ const OVERSEERR_API = process.env.OVERSEERR_API;
 // Serve static files from public folder
 app.use(express.static("public"));
 
-// Store request results
-const requestResults = new Map();
-
-// Function to make Overseerr request
+// Function to make Overseerr request (SERVERLESS COMPATIBLE)
 async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, episodeNumber = null, requestType = 'season') {
     try {
         let requestDescription = mediaName;
@@ -193,7 +190,70 @@ function encodeConfig(config) {
     return Buffer.from(configJson).toString('base64');
 }
 
-// ─── NEW: Configured Manifest for User-specific URLs ───────────────────
+// ─── SERVERLESS COMPATIBLE: Background request trigger ────────────
+async function triggerBackgroundRequest(tmdbId, type, mediaName, seasonNumber = null, episodeNumber = null, requestType = 'season', userConfig = null) {
+    try {
+        console.log(`[BACKGROUND] Starting background request for ${mediaName}`);
+        
+        let requestBody = {
+            mediaId: parseInt(tmdbId),
+            mediaType: type === 'movie' ? 'movie' : 'tv'
+        };
+
+        // For TV shows, handle seasons based on request type
+        if (type === 'series') {
+            if (requestType === 'season' && seasonNumber !== null) {
+                requestBody.seasons = [seasonNumber];
+            } else if (requestType === 'series') {
+                try {
+                    const tmdbKey = userConfig ? userConfig.tmdbKey : TMDB_API_KEY;
+                    const tmdbResponse = await fetch(
+                        `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${tmdbKey}`
+                    );
+
+                    if (tmdbResponse.ok) {
+                        const tvData = await tmdbResponse.json();
+                        const allSeasons = tvData.seasons
+                            .filter(season => season.season_number > 0)
+                            .map(season => season.season_number);
+                        requestBody.seasons = allSeasons;
+                    } else {
+                        requestBody.seasons = [seasonNumber || 1];
+                    }
+                } catch (tmdbError) {
+                    requestBody.seasons = [seasonNumber || 1];
+                }
+            }
+        }
+
+        const overseerrUrl = userConfig ? userConfig.overseerrUrl : OVERSEERR_URL;
+        const overseerrApi = userConfig ? userConfig.overseerrApi : OVERSEERR_API;
+
+        const response = await fetch(
+            `${overseerrUrl}/api/v1/request`,
+            {
+                method: 'POST',
+                headers: {
+                    'X-Api-Key': overseerrApi,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            }
+        );
+
+        if (response.ok) {
+            const data = await response.json();
+            console.log(`[BACKGROUND] Success: ${mediaName} - Request ID: ${data.id}`);
+        } else {
+            const errorText = await response.text();
+            console.error(`[BACKGROUND] Failed: ${mediaName} - ${errorText}`);
+        }
+    } catch (error) {
+        console.error(`[BACKGROUND] Error: ${mediaName} - ${error.message}`);
+    }
+}
+
+// ─── Configured Manifest for User-specific URLs ───────────────────
 app.get("/configured/:config/manifest.json", (req, res) => {
     const { config } = req.params;
 
@@ -219,168 +279,45 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── NEW: Configured Overseerr Request Function ────────────────────────
-async function makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, episodeNumber = null, requestType = 'season', userConfig) {
-    try {
-        let requestDescription = mediaName;
-        if (seasonNumber !== null && episodeNumber !== null) {
-            if (requestType === 'season') {
-                requestDescription = `${mediaName} Season ${seasonNumber}`;
-            } else {
-                requestDescription = `${mediaName} (Full Series)`;
-            }
-        }
-
-        console.log(`[REQUEST] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - ${requestDescription}`);
-
-        const requestBody = {
-            mediaId: parseInt(tmdbId),
-            mediaType: type === 'movie' ? 'movie' : 'tv'
-        };
-
-        // For TV shows, handle seasons based on request type
-        if (type === 'series') {
-            if (requestType === 'season' && seasonNumber !== null) {
-                requestBody.seasons = [seasonNumber];
-                console.log(`[REQUEST] Setting seasons to [${seasonNumber}] for season request`);
-            } else if (requestType === 'series') {
-                try {
-                    console.log(`[REQUEST] Fetching available seasons for full series request...`);
-                    const tmdbResponse = await fetch(
-                        `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${userConfig.tmdbKey}`
-                    );
-
-                    if (tmdbResponse.ok) {
-                        const tvData = await tmdbResponse.json();
-                        const allSeasons = tvData.seasons
-                            .filter(season => season.season_number > 0)
-                            .map(season => season.season_number);
-
-                        requestBody.seasons = allSeasons;
-                        console.log(`[REQUEST] Setting seasons to all available: [${allSeasons.join(', ')}]`);
-                    } else {
-                        console.warn(`[REQUEST] Could not fetch seasons from TMDB, defaulting to season ${seasonNumber || 1}`);
-                        requestBody.seasons = [seasonNumber || 1];
-                    }
-                } catch (tmdbError) {
-                    console.warn(`[REQUEST] TMDB season fetch failed: ${tmdbError.message}, using default season`);
-                    requestBody.seasons = [seasonNumber || 1];
-                }
-            }
-        }
-
-        console.log(`[REQUEST] Final request body:`, JSON.stringify(requestBody));
-
-        const response = await fetch(
-            `${userConfig.overseerrUrl}/api/v1/request`,
-            {
-                method: 'POST',
-                headers: {
-                    'X-Api-Key': userConfig.overseerrApi,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(requestBody)
-            }
-        );
-
-        if (response.ok) {
-            const data = await response.json();
-            console.log(`[REQUEST] Success for: ${requestDescription}`);
-            return { success: true, data: data };
-        } else {
-            const errorText = await response.text();
-            console.error('[REQUEST] Failed:', errorText);
-            return {
-                success: false,
-                error: `HTTP ${response.status}: ${errorText}`
-            };
-        }
-    } catch (error) {
-        console.error('[REQUEST] Failed:', error.message);
-        return {
-            success: false,
-            error: error.message
-        };
-    }
-}
-
-// ─── NEW: Configured Video Route (FIXED STREAMING) ───────
+// ─── Configured Video Route (SERVERLESS COMPATIBLE) ───────
 app.get("/configured/:config/video/:type/:tmdbId", async (req, res) => {
     const { config, type, tmdbId } = req.params;
     const { title, season, episode, request_type } = req.query;
     const mediaName = title || 'Unknown';
 
-    console.log(`[VIDEO DEBUG] ========== VIDEO ENDPOINT CALLED ==========`);
-    console.log(`[VIDEO DEBUG] Config: ${config.substring(0, 20)}...`);
-    console.log(`[VIDEO DEBUG] Type: ${type}, TMDB ID: ${tmdbId}`);
-    console.log(`[VIDEO DEBUG] Query params:`, { title, season, episode, request_type });
-    console.log(`[VIDEO DEBUG] Headers:`, req.headers);
-    console.log(`[VIDEO DEBUG] ===========================================`);
+    console.log(`[VIDEO] Video requested for ${type} ${tmdbId} - ${mediaName}`,
+        season ? `Season ${season}` : '',
+        episode ? `Episode ${episode}` : '',
+        request_type ? `Type: ${request_type}` : ''
+    );
 
     // Decode configuration
     const userConfig = decodeConfig(config);
     if (!userConfig) {
-        console.log(`[VIDEO DEBUG] Invalid configuration`);
+        console.log(`[VIDEO] Invalid configuration`);
         return res.status(400).send('Invalid configuration');
     }
 
-    // Create unique request key based on request type AND media type AND user config
-    let requestKey;
-    if (type === 'movie') {
-        // Movies don't have seasons - use simple key
-        requestKey = `movie-${tmdbId}-${config}`;
-    } else {
-        // TV shows use season/series based keys
-        requestKey = request_type === 'series'
-            ? `series-${tmdbId}-series-${config}`
-            : `series-${tmdbId}-season-${season}-${config}`;
-    }
+    // SERVERLESS COMPATIBLE: Fire and forget background request
+    const seasonNum = season ? parseInt(season) : null;
+    const episodeNum = episode ? parseInt(episode) : null;
+    const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
 
-    console.log(`[VIDEO] Video requested for ${type} ${tmdbId} - ${mediaName}`,
-        season ? `Season ${season}` : '',
-        episode ? `Episode ${episode}` : '',
-        request_type ? `Type: ${request_type}` : '',
-        `Key: ${requestKey}`
-    );
-
-    // Trigger Overseerr request in background
-    if (!requestResults.has(requestKey)) {
-        console.log(`[VIDEO] Making background request for ${mediaName} (${request_type || (type === 'movie' ? 'movie' : 'season')})`);
-        requestResults.set(requestKey, { processing: true });
-
-        const seasonNum = season ? parseInt(season) : null;
-        const episodeNum = episode ? parseInt(episode) : null;
-        const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
-
-        makeConfiguredOverseerrRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType, userConfig)
-            .then(result => {
-                console.log(`[BACKGROUND] ${reqType} request completed for ${mediaName}: ${result.success ? 'SUCCESS' : 'FAILED'}`);
-                if (result.success) {
-                    console.log(`[BACKGROUND] Overseerr request ID: ${result.data.id}`);
-                } else {
-                    console.log(`[BACKGROUND] Error: ${result.error}`);
-                }
-                requestResults.set(requestKey, result);
-            })
-            .catch(error => {
-                console.error(`[BACKGROUND] Request error for ${mediaName}:`, error.message);
-                requestResults.set(requestKey, { success: false, error: error.message });
-            });
-    } else {
-        console.log(`[VIDEO] Request already processed for ${requestKey}`);
-    }
+    // Trigger background request without waiting
+    triggerBackgroundRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType, userConfig)
+        .catch(err => console.error(`[BACKGROUND] Unhandled error: ${err.message}`));
 
     // Set CORS headers for Stremio
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
 
-    // FIXED: Always redirect to CDN video for reliable streaming
+    // Always redirect to CDN video for reliable streaming
     console.log(`[VIDEO] Redirecting to CDN video for ${mediaName}`);
     res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
 });
 
-// ─── NEW: Configured Stream Endpoint (SAME LOGIC, DIFFERENT CONFIG) ───
+// ─── Configured Stream Endpoint ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
 
@@ -430,7 +367,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             tmdbId = parsedId.tmdbId;
         }
 
-        // Build streams array - CRITICAL: Use proper Stremio stream format
+        // Build streams array
         let streams = [];
 
         if (type === 'movie') {
@@ -439,10 +376,8 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             streams.push({
                 title: `Request Movie (Overseerr)`,
                 url: videoUrl,
-                // Stremio-specific properties that might help
                 name: "Overseerr",
                 behaviorHints: {
-                    // These hints might help Stremio understand how to handle the stream
                     notWebReady: true,
                     bingeGroup: `overseerr-${tmdbId}`
                 }
@@ -521,69 +456,33 @@ app.get("/manifest.json", (req, res) => {
     });
 });
 
-// ─── ORIGINAL: Video Route for Stremio (FIXED STREAMING) ────────────
+// ─── ORIGINAL: Video Route for Stremio (SERVERLESS COMPATIBLE) ────────────
 app.get("/video/:type/:tmdbId", async (req, res) => {
     const { type, tmdbId } = req.params;
     const { title, season, episode, request_type } = req.query;
     const mediaName = title || 'Unknown';
 
-    console.log(`[VIDEO DEBUG] ========== ORIGINAL VIDEO ENDPOINT CALLED ==========`);
-    console.log(`[VIDEO DEBUG] Type: ${type}, TMDB ID: ${tmdbId}`);
-    console.log(`[VIDEO DEBUG] Query params:`, { title, season, episode, request_type });
-    console.log(`[VIDEO DEBUG] ====================================================`);
-
-    // Create unique request key based on request type AND media type
-    let requestKey;
-    if (type === 'movie') {
-        // Movies don't have seasons - use simple key
-        requestKey = `movie-${tmdbId}`;
-    } else {
-        // TV shows use season/series based keys
-        requestKey = request_type === 'series'
-            ? `series-${tmdbId}-series`
-            : `series-${tmdbId}-season-${season}`;
-    }
-
     console.log(`[VIDEO] Video requested for ${type} ${tmdbId} - ${mediaName}`,
         season ? `Season ${season}` : '',
         episode ? `Episode ${episode}` : '',
-        request_type ? `Type: ${request_type}` : '',
-        `Key: ${requestKey}`
+        request_type ? `Type: ${request_type}` : ''
     );
 
-    // Trigger Overseerr request in background
-    if (!requestResults.has(requestKey)) {
-        console.log(`[VIDEO] Making background request for ${mediaName} (${request_type || (type === 'movie' ? 'movie' : 'season')})`);
-        requestResults.set(requestKey, { processing: true });
+    // SERVERLESS COMPATIBLE: Fire and forget background request
+    const seasonNum = season ? parseInt(season) : null;
+    const episodeNum = episode ? parseInt(episode) : null;
+    const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
 
-        const seasonNum = season ? parseInt(season) : null;
-        const episodeNum = episode ? parseInt(episode) : null;
-        const reqType = request_type || (type === 'movie' ? 'movie' : 'season');
-
-        makeOverseerrRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType)
-            .then(result => {
-                console.log(`[BACKGROUND] ${reqType} request completed for ${mediaName}: ${result.success ? 'SUCCESS' : 'FAILED'}`);
-                if (result.success) {
-                    console.log(`[BACKGROUND] Overseerr request ID: ${result.data.id}`);
-                } else {
-                    console.log(`[BACKGROUND] Error: ${result.error}`);
-                }
-                requestResults.set(requestKey, result);
-            })
-            .catch(error => {
-                console.error(`[BACKGROUND] Request error for ${mediaName}:`, error.message);
-                requestResults.set(requestKey, { success: false, error: error.message });
-            });
-    } else {
-        console.log(`[VIDEO] Request already processed for ${requestKey}`);
-    }
+    // Trigger background request without waiting
+    triggerBackgroundRequest(tmdbId, type, mediaName, seasonNum, episodeNum, reqType)
+        .catch(err => console.error(`[BACKGROUND] Unhandled error: ${err.message}`));
 
     // Set CORS headers for Stremio
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
 
-    // FIXED: Always redirect to CDN video for reliable streaming
+    // Always redirect to CDN video for reliable streaming
     console.log(`[VIDEO] Redirecting to CDN video for ${mediaName}`);
     res.redirect('https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4');
 });
@@ -712,7 +611,7 @@ app.options('*', (req, res) => {
     res.sendStatus(200);
 });
 
-// ─── NEW: Server-side Configuration Testing Endpoints ─────────────────
+// ─── Server-side Configuration Testing Endpoints ─────────────────
 app.post("/api/test-configuration", express.json(), async (req, res) => {
     try {
         const { tmdbKey, overseerrUrl, overseerrApi } = req.body;
@@ -1001,7 +900,7 @@ app.get("/", (req, res) => {
     res.send(html);
 });
 
-// ─── ORIGINAL: Helper: Run self-tests ────────────
+// ─── Helper: Run self-tests ────────────
 async function runSelfTests() {
     const results = [];
 
@@ -1063,41 +962,18 @@ async function runSelfTests() {
     return results;
 }
 
-// ─── ORIGINAL: Status endpoints ──────────────────
+// ─── Status endpoints ──────────────────
 app.get("/health", (req, res) => {
     const localVideoPath = getVideoPath();
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        requestCount: requestResults.size,
+        server: 'Vercel Serverless Ready',
         videoSource: localVideoPath ? 'local' : 'github'
     });
 });
 
-app.get("/status/:type/:tmdbId", (req, res) => {
-    const { type, tmdbId } = req.params;
-    const { season, request_type } = req.query;
-
-    // Use the same key generation logic as video endpoint
-    let requestKey;
-    if (type === 'movie') {
-        requestKey = `movie-${tmdbId}`;
-    } else {
-        requestKey = request_type
-            ? `series-${tmdbId}-${request_type}`
-            : season
-                ? `series-${tmdbId}-season-${season}`
-                : `series-${tmdbId}`;
-    }
-
-    if (requestResults.has(requestKey)) {
-        res.json(requestResults.get(requestKey));
-    } else {
-        res.json({ status: 'not_found' });
-    }
-});
-
-// ─── ORIGINAL: Direct video test endpoint ────────
+// ─── Direct video test endpoint ────────
 app.get("/test-video", (req, res) => {
     const localVideoPath = getVideoPath();
     if (localVideoPath) {
@@ -1135,11 +1011,10 @@ app.listen(PORT, '0.0.0.0', () => {
             console.log(`${icon} ${test.name}: ${test.message}`);
         });
         console.log("🚀 Addon is ready!");
-        console.log("\n🎭 MULTI-STREAM SUPPORT:");
-        console.log("   • Movies: Single 'Request Movie (Overseerr)' option");
-        console.log("   • TV Episodes: TWO options:");
-        console.log("     1. 'Request Season X (Overseerr)' - Requests only that season");
-        console.log("     2. 'Request Full Series (Overseerr)' - Requests all seasons");
+        console.log("\n🎭 SERVERLESS COMPATIBLE FEATURES:");
+        console.log("   • Stateless design - no memory storage");
+        console.log("   • Fire-and-forget background requests");
+        console.log("   • Vercel serverless compatible");
         console.log("\n🌐 TORRENTIO-STYLE URLS:");
         console.log("   • Users can generate personal addon URLs with their own API keys");
         console.log("   • Visit the configuration page to get started");
