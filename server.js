@@ -158,17 +158,42 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
                 fetchOptions.agent = new (await import('https')).Agent({
                     rejectUnauthorized: false
                 });
-                response = await fetch(`${normalizedUrl}/api/v1/request`, fetchOptions);
+                try {
+                    response = await fetch(`${normalizedUrl}/api/v1/request`, fetchOptions);
+                    console.log(`[OVERSEERR] HTTPS request completed with status: ${response.status}`);
+                } catch (httpsError) {
+                    console.error(`[OVERSEERR] HTTPS request error:`, httpsError);
+                    console.log(`[OVERSEERR] Full HTTPS error details:`, {
+                        name: httpsError.name,
+                        message: httpsError.message,
+                        code: httpsError.code,
+                        errno: httpsError.errno,
+                        syscall: httpsError.syscall
+                    });
+                }
             }
         } catch (error) {
-            console.log(`[OVERSEERR] HTTPS request failed, trying HTTP: ${error.message}`);
+            console.error(`[OVERSEERR] Error setting up HTTPS request:`, error);
         }
 
         // If HTTPS failed or it's an HTTP URL, try HTTP
-        if (!response) {
-            console.log(`[OVERSEERR] Attempting HTTP request to: ${httpUrl}`);
-            delete fetchOptions.agent; // Remove HTTPS agent for HTTP request
-            response = await fetch(`${httpUrl}/api/v1/request`, fetchOptions);
+        if (!response || !response.ok) {
+            console.log(`[OVERSEERR] HTTPS request failed or not attempted, trying HTTP: ${httpUrl}`);
+            try {
+                delete fetchOptions.agent; // Remove HTTPS agent for HTTP request
+                response = await fetch(`${httpUrl}/api/v1/request`, fetchOptions);
+                console.log(`[OVERSEERR] HTTP request completed with status: ${response.status}`);
+            } catch (httpError) {
+                console.error(`[OVERSEERR] HTTP request error:`, httpError);
+                console.log(`[OVERSEERR] Full HTTP error details:`, {
+                    name: httpError.name,
+                    message: httpError.message,
+                    code: httpError.code,
+                    errno: httpError.errno,
+                    syscall: httpError.syscall
+                });
+                throw httpError; // Re-throw to be caught by outer try-catch
+            }
         }
 
         console.log(`[OVERSEERR] Response status: ${response.status} ${response.statusText}`);
