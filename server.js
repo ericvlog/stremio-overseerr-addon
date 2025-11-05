@@ -369,46 +369,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
 
-        // Only trigger Overseerr request when stream is actually played
-        const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
-        
-        if (!pendingRequests.has(requestKey)) {
-            pendingRequests.add(requestKey);
-            
-            console.log(`[BACKGROUND] Triggering Overseerr request for: "${title}"`);
-            
-            const seasonNum = season ? parseInt(season) : null;
-            const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
-
-            // Make the request only when the stream is loaded
-            try {
-                console.log(`[OVERSEERR] 🔄 Making immediate request for "${title}"`);
-                console.log(`[OVERSEERR] Request details:`, {
-                    tmdbId,
-                    type,
-                    title,
-                    seasonNum,
-                    reqType
-                });
-                
-                const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
-                
-                if (result.success) {
-                    console.log(`[OVERSEERR] ✅ Request successful for "${title}"`);
-                    console.log(`[OVERSEERR] Request ID: ${result.requestId}`);
-                } else {
-                    console.error(`[OVERSEERR] ❌ Request failed for "${title}": ${result.error}`);
-                }
-            } catch (error) {
-                console.error(`[OVERSEERR] ❌ Request error for "${title}": ${error.message}`);
-            } finally {
-                pendingRequests.delete(requestKey);
-                console.log(`[OVERSEERR] 🏁 Request processing completed for "${title}"`);
-            }
-        } else {
-            console.log(`[BACKGROUND] Request already pending for: "${title}"`);
-        }
-
+        // Only return the stream object, no request is made here
         res.json({
             streams: streams
         });
@@ -480,10 +441,12 @@ app.get("/stream/:type/:id.json", async (req, res) => {
         let streams = [];
 
         if (type === 'movie') {
-            streams.push(createStreamObject(title, 'movie', tmdbId));
+            streams.push(createStreamObject(title, 'movie', tmdbId, null, null));
         } else if (type === 'series') {
             if (parsedId.season !== null) {
                 streams.push(createStreamObject(title, 'series', tmdbId, parsedId.season, parsedId.episode));
+            } else {
+                streams.push(createStreamObject(title, 'series', tmdbId, null, null));
             }
         }
 
