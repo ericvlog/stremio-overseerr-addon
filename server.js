@@ -182,7 +182,76 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint (FIXED: No auto-request) ───
+// ─── NEW: Playback Endpoint that triggers Overseerr requests ───
+app.get("/play/:config/:type/:tmdbId", async (req, res) => {
+    const { config, type, tmdbId } = req.params;
+    const { title, season, episode } = req.query;
+    
+    console.log(`[PLAY] Stream clicked for: ${title} (TMDB: ${tmdbId})`);
+    
+    try {
+        const userConfig = decodeConfig(config);
+        
+        if (userConfig && title) {
+            // Trigger Overseerr request when stream is played
+            const seasonNum = season ? parseInt(season) : null;
+            const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+            
+            console.log(`[PLAY] Making Overseerr request for: ${title}`);
+            
+            // Don't await - make it non-blocking so video plays immediately
+            setTimeout(async () => {
+                try {
+                    const overseerrResult = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                    if (overseerrResult.success) {
+                        console.log(`[PLAY] ✅ Request submitted for: ${title} - ID: ${overseerrResult.requestId}`);
+                    } else {
+                        console.log(`[PLAY] ❌ Request failed for: ${title} - ${overseerrResult.error}`);
+                    }
+                } catch (error) {
+                    console.error(`[PLAY] Error for ${title}:`, error.message);
+                }
+            }, 100);
+        }
+        
+        // Redirect to the actual wait.mp4 video immediately
+        res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+        
+    } catch (error) {
+        console.error(`[PLAY] Error: ${error.message}`);
+        // Still redirect to video even if request fails
+        res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+    }
+});
+
+// ─── Updated Stream Format with Playback URL ──────────────────
+function createStreamObjectWithPlayback(title, type, tmdbId, season = null, episode = null, config = null) {
+    let streamTitle;
+    if (type === 'movie') {
+        streamTitle = `Request "${title}"`;
+    } else if (season && episode) {
+        streamTitle = `Request S${season}E${episode} of "${title}"`;
+    } else if (season) {
+        streamTitle = `Request Season ${season} of "${title}"`;
+    } else {
+        streamTitle = `Request "${title}"`;
+    }
+
+    // Create playback URL that will trigger Overseerr request
+    const playUrl = `${SERVER_URL}/play/${config}/${type}/${tmdbId}?title=${encodeURIComponent(title)}${season ? `&season=${season}&episode=${episode}` : ''}`;
+
+    return {
+        name: "Overseerr",
+        title: streamTitle,
+        url: playUrl,
+        behaviorHints: {
+            notWebReady: false,
+            bingeGroup: `overseerr-${type}-${tmdbId}`
+        }
+    };
+}
+
+// ─── Configured Stream Endpoint (Uses playback URLs) ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -250,21 +319,21 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Build streams array - NO AUTO-REQUEST
+        // Build streams array with playback URLs
         let streams = [];
 
         if (type === 'movie') {
-            streams.push(createStreamObject(title, 'movie', tmdbId));
+            streams.push(createStreamObjectWithPlayback(title, 'movie', tmdbId, null, null, config));
         } else if (type === 'series') {
             if (season !== null && episode !== null) {
-                streams.push(createStreamObject(title, 'series', tmdbId, season, episode));
+                streams.push(createStreamObjectWithPlayback(title, 'series', tmdbId, season, episode, config));
             } else {
-                streams.push(createStreamObject(title, 'series', tmdbId));
+                streams.push(createStreamObjectWithPlayback(title, 'series', tmdbId, null, null, config));
             }
         }
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
-        console.log(`[STREAM] ✅ No auto-request - Request will only happen when user clicks stream`);
+        console.log(`[STREAM] ✅ Using playback URLs - Request will happen when stream is clicked`);
 
         res.json({
             streams: streams
@@ -365,7 +434,8 @@ app.get("/health", (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
-        video: 'Using your wait.mp4 from CDN'
+        video: 'Using your wait.mp4 from CDN',
+        behavior: 'Requests triggered when streams are clicked ✅'
     });
 });
 
@@ -483,7 +553,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ FIXED:</strong> Overseerr requests now only happen when you click streams, not when browsing movies!
+                <strong>✅ FIXED:</strong> Overseerr requests now happen when you click streams! The video plays immediately and the request is submitted in the background.
             </div>
 
             <form id="configForm">
@@ -698,5 +768,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
     console.log(`🎯 Using YOUR wait.mp4 from CDN for all streams`);
-    console.log(`🚀 OVERSEERR REQUESTS: No auto-requests - only when streams are clicked`);
+    console.log(`🚀 OVERSEERR REQUESTS NOW WORKING - Requests happen when streams are clicked!`);
+    console.log(`🔧 Using playback URLs that trigger Overseerr requests`);
 });
