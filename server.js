@@ -403,20 +403,16 @@ app.get("/manifest.json", (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    res.json({
-        id: "org.stremio.overseerr",
-        version: "1.0.0",
-        name: "Overseerr Requests",
-        description: "Request movies and shows through Overseerr - configure your instance",
-        resources: ["stream"],
-        types: ["movie", "series"],
-        catalogs: [],
-        idPrefixes: ["tt"],
-        behaviorHints: {
-            configurable: true,
-            configurationRequired: true
-        }
-    });
+        res.json({
+            id: "org.stremio.overseerr",
+            version: "1.0.0",
+            name: "Overseerr Requests",
+            description: "Request movies and shows through Overseerr - configure your instance",
+            resources: ["stream"],
+            types: ["movie", "series"],
+            catalogs: [],
+            idPrefixes: ["tt"]
+        });
 });
 
 // ─── Default Stream Endpoint ───────
