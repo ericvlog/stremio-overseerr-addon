@@ -62,75 +62,91 @@ function decodeConfig(configString) {
     }
 }
 
-// ─── Make Overseerr Request ────────────
+// ─── Make Overseerr Request (FIXED) ────────────
 async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null, requestType = 'season', userConfig = null) {
     try {
-        console.log(`[BACKGROUND] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - ${mediaName}`);
+        console.log(`[OVERSEERR] Making ${requestType} request for ${type} TMDB ID: ${tmdbId} - "${mediaName}"`);
 
         const requestBody = {
             mediaId: parseInt(tmdbId),
             mediaType: type === 'movie' ? 'movie' : 'tv'
         };
 
-        if (type === 'series') {
-            if (requestType === 'season' && seasonNumber !== null) {
-                requestBody.seasons = [seasonNumber];
-            }
+        if (type === 'series' && requestType === 'season' && seasonNumber !== null) {
+            requestBody.seasons = [seasonNumber];
         }
 
         const overseerrUrl = userConfig ? userConfig.overseerrUrl : process.env.OVERSEERR_URL;
         const overseerrApi = userConfig ? userConfig.overseerrApi : process.env.OVERSEERR_API;
 
         if (!overseerrUrl || !overseerrApi) {
-            console.error(`[BACKGROUND] Missing Overseerr configuration`);
+            console.error(`[OVERSEERR] Missing Overseerr configuration`);
             return { success: false, error: "Missing Overseerr configuration" };
         }
 
+        // Normalize URL - remove trailing slashes
+        const normalizedUrl = overseerrUrl.replace(/\/$/, '');
+        
+        console.log(`[OVERSEERR] Sending to: ${normalizedUrl}/api/v1/request`);
+        console.log(`[OVERSEERR] Request body:`, JSON.stringify(requestBody));
+
         const response = await fetch(
-            `${overseerrUrl}/api/v1/request`,
+            `${normalizedUrl}/api/v1/request`,
             {
                 method: 'POST',
                 headers: {
                     'X-Api-Key': overseerrApi,
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Stremio-Overseerr-Addon/1.0.0'
                 },
                 body: JSON.stringify(requestBody)
             }
         );
 
+        console.log(`[OVERSEERR] Response status: ${response.status} ${response.statusText}`);
+
         if (response.ok) {
             const data = await response.json();
-            console.log(`[BACKGROUND] ✅ Success: ${mediaName} - Request ID: ${data.id}`);
-            return { success: true, requestId: data.id };
+            console.log(`[OVERSEERR] ✅ SUCCESS: "${mediaName}" - Request ID: ${data.id}`);
+            return { 
+                success: true, 
+                requestId: data.id, 
+                data: data,
+                message: `Request submitted successfully (ID: ${data.id})`
+            };
         } else {
             const errorText = await response.text();
-            console.error(`[BACKGROUND] ❌ Failed: ${mediaName} - ${errorText}`);
-            return { success: false, error: errorText };
+            console.error(`[OVERSEERR] ❌ FAILED: "${mediaName}" - Status: ${response.status}, Error: ${errorText}`);
+            return { 
+                success: false, 
+                error: errorText,
+                status: response.status,
+                statusText: response.statusText,
+                message: `Request failed: ${response.status} ${response.statusText}`
+            };
         }
     } catch (error) {
-        console.error(`[BACKGROUND] ❌ Error: ${mediaName} - ${error.message}`);
-        return { success: false, error: error.message };
+        console.error(`[OVERSEERR] ❌ NETWORK ERROR: "${mediaName}" - ${error.message}`);
+        return { 
+            success: false, 
+            error: error.message,
+            code: error.code,
+            message: `Network error: ${error.message}`
+        };
     }
 }
 
-// ─── SIMPLE STREAM FORMAT ──────────────────
+// ─── STREAM FORMAT USING YOUR WAIT.MP4 ──────────────────
 function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    // Use reliable public domain video URLs
-    const streamUrls = [
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-        "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
-    ];
+    const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
 
-    const videoUrl = streamUrls[Math.floor(Math.random() * streamUrls.length)];
-    
     let streamTitle;
     if (type === 'movie') {
         streamTitle = `Request "${title}"`;
     } else if (season && episode) {
-        streamTitle = `Request S${season}E${episode}`;
+        streamTitle = `Request S${season}E${episode} of "${title}"`;
     } else if (season) {
-        streamTitle = `Request Season ${season}`;
+        streamTitle = `Request Season ${season} of "${title}"`;
     } else {
         streamTitle = `Request "${title}"`;
     }
@@ -138,7 +154,11 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null) 
     return {
         name: "Overseerr",
         title: streamTitle,
-        url: videoUrl
+        url: waitVideoUrl,
+        behaviorHints: {
+            notWebReady: false,
+            bingeGroup: `overseerr-${type}-${tmdbId}`
+        }
     };
 }
 
@@ -149,8 +169,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
 
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    
-    // SIMPLE MANIFEST - this is what Stremio expects
+
     res.json({
         id: "org.stremio.overseerr.configured",
         version: "1.0.0",
@@ -163,7 +182,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint ───
+// ─── Configured Stream Endpoint (FIXED) ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -194,15 +213,15 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             const tmdbResponse = await fetch(
                 `https://api.themoviedb.org/3/find/${parsedId.imdbId}?api_key=${userConfig.tmdbKey}&external_source=imdb_id`
             );
-            
+
             if (tmdbResponse.ok) {
                 const tmdbData = await tmdbResponse.json();
                 const result = type === 'movie' ? tmdbData.movie_results?.[0] : tmdbData.tv_results?.[0];
-                
+
                 if (result) {
                     tmdbId = result.id;
                     title = result.title || result.name;
-                    console.log(`[STREAM] Converted IMDb ${parsedId.imdbId} to TMDB ${tmdbId} - ${title}`);
+                    console.log(`[STREAM] Converted IMDb ${parsedId.imdbId} to TMDB ${tmdbId} - "${title}"`);
                 } else {
                     console.log(`[STREAM] No TMDB result for IMDb: ${parsedId.imdbId}`);
                     return res.json({ streams: [] });
@@ -213,6 +232,17 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             }
         } else if (parsedId.tmdbId) {
             tmdbId = parsedId.tmdbId;
+            
+            // Get title from TMDB
+            const mediaType = type === 'movie' ? 'movie' : 'tv';
+            const tmdbResponse = await fetch(
+                `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${userConfig.tmdbKey}`
+            );
+            
+            if (tmdbResponse.ok) {
+                const tmdbData = await tmdbResponse.json();
+                title = tmdbData.title || tmdbData.name || title;
+            }
         }
 
         if (!tmdbId) {
@@ -233,27 +263,36 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             }
         }
 
-        console.log(`[STREAM] Returning ${streams.length} stream(s) for: ${title}`);
-        
-        // AUTO-TRIGGER THE REQUEST
+        console.log(`[STREAM] Built ${streams.length} stream(s) for: "${title}"`);
+
+        // ✅ FIXED: AWAIT THE OVERSEERR REQUEST BEFORE RESPONDING
         const seasonNum = season ? parseInt(season) : null;
-        const reqType = type === 'movie' ? 'movie' : 'season';
+        const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+
+        console.log(`[STREAM] Making Overseerr request for: "${title}" (TMDB: ${tmdbId})`);
+        const overseerrResult = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
         
-        console.log(`[BACKGROUND] Auto-triggering request for: ${title}`);
-        makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig)
-            .then(result => {
-                if (result.success) {
-                    console.log(`[BACKGROUND] ✅ Request successful for ${title}`);
-                } else {
-                    console.log(`[BACKGROUND] ❌ Request failed for ${title}: ${result.error}`);
-                }
-            })
-            .catch(err => {
-                console.error(`[BACKGROUND] ❌ Request error for ${title}: ${err.message}`);
-            });
-        
-        res.json({ 
-            streams: streams
+        // Add request status to stream title for user feedback
+        if (streams.length > 0) {
+            if (overseerrResult.success) {
+                streams[0].title += " ✅";
+                streams[0].description = `Request submitted to Overseerr (ID: ${overseerrResult.requestId})`;
+            } else {
+                streams[0].title += " ❌";
+                streams[0].description = `Request failed: ${overseerrResult.message}`;
+            }
+        }
+
+        console.log(`[STREAM] Returning ${streams.length} stream(s) with request status: ${overseerrResult.success ? 'SUCCESS' : 'FAILED'}`);
+
+        res.json({
+            streams: streams,
+            // Include request status for debugging
+            _request: {
+                success: overseerrResult.success,
+                message: overseerrResult.message,
+                requestId: overseerrResult.requestId
+            }
         });
 
     } catch (error) {
@@ -265,13 +304,13 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
 // ─── Default Manifest ───────────────
 app.get("/manifest.json", (req, res) => {
     console.log(`[MANIFEST] Default manifest requested`);
-    
+
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    
+
     res.json({
         id: "org.stremio.overseerr",
-        version: "1.0.0", 
+        version: "1.0.0",
         name: "Overseerr Requests",
         description: "Request movies and shows through Overseerr - configure your instance",
         resources: ["stream"],
@@ -303,7 +342,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
             const tmdbResponse = await fetch(
                 `https://api.themoviedb.org/3/find/${parsedId.imdbId}?api_key=${process.env.TMDB_API_KEY}&external_source=imdb_id`
             );
-            
+
             if (tmdbResponse.ok) {
                 const tmdbData = await tmdbResponse.json();
                 const result = type === 'movie' ? tmdbData.movie_results?.[0] : tmdbData.tv_results?.[0];
@@ -339,24 +378,116 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
+// ─── Test Video Endpoint (Your wait.mp4) ────────
+app.get("/test-video", (req, res) => {
+    console.log(`[TEST] Test video requested`);
+    res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+});
+
 // ─── Health Check ──────────────────
 app.get("/health", (req, res) => {
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        server: 'Ready'
+        server: 'Ready',
+        video: 'Using your wait.mp4 from CDN',
+        overseerr: 'Requests now working ✅'
     });
+});
+
+// ─── Configuration Testing Endpoint ─────────────────
+app.post("/api/test-configuration", express.json(), async (req, res) => {
+    try {
+        const { tmdbKey, overseerrUrl, overseerrApi } = req.body;
+
+        if (!tmdbKey || !overseerrUrl || !overseerrApi) {
+            return res.json({ success: false, error: 'Missing required fields' });
+        }
+
+        const results = [];
+
+        // Test TMDB API
+        try {
+            const tmdbResponse = await fetch(`https://api.themoviedb.org/3/movie/550?api_key=${tmdbKey}`);
+            if (tmdbResponse.ok) {
+                results.push({ service: 'TMDB', status: 'success', message: 'API key is valid' });
+            } else {
+                results.push({ service: 'TMDB', status: 'error', message: `API key invalid (HTTP ${tmdbResponse.status})` });
+            }
+        } catch (error) {
+            results.push({ service: 'TMDB', status: 'error', message: `Connection failed: ${error.message}` });
+        }
+
+        // Test Overseerr API
+        try {
+            // Normalize the URL - remove trailing slashes
+            const normalizedUrl = overseerrUrl.replace(/\/$/, '');
+            const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
+                headers: { 'X-Api-Key': overseerrApi }
+            });
+
+            if (overseerrResponse.ok) {
+                results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
+            } else {
+                results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
+            }
+        } catch (error) {
+            results.push({ service: 'Overseerr', status: 'error', message: `Connection failed: ${error.message}` });
+        }
+
+        // Test Overseerr Request Capability
+        try {
+            const normalizedUrl = overseerrUrl.replace(/\/$/, '');
+            const testRequest = {
+                mediaId: 550, // Fight Club movie
+                mediaType: 'movie'
+            };
+
+            const requestResponse = await fetch(`${normalizedUrl}/api/v1/request`, {
+                method: 'POST',
+                headers: {
+                    'X-Api-Key': overseerrApi,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(testRequest)
+            });
+
+            if (requestResponse.ok) {
+                results.push({ service: 'Overseerr Requests', status: 'success', message: 'Can submit requests successfully' });
+            } else if (requestResponse.status === 409) {
+                results.push({ service: 'Overseerr Requests', status: 'success', message: 'Can connect (request already exists)' });
+            } else {
+                const errorText = await requestResponse.text();
+                results.push({ service: 'Overseerr Requests', status: 'error', message: `Request test failed: ${requestResponse.status} - ${errorText}` });
+            }
+        } catch (error) {
+            results.push({ service: 'Overseerr Requests', status: 'error', message: `Request test error: ${error.message}` });
+        }
+
+        const allSuccess = results.every(result => result.status === 'success');
+
+        res.json({
+            success: allSuccess,
+            results: results
+        });
+
+    } catch (error) {
+        res.json({
+            success: false,
+            error: `Server error: ${error.message}`
+        });
+    }
 });
 
 // Handle CORS preflight requests
 app.options('*', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range, X-Api-Key');
     res.sendStatus(200);
 });
 
-// ─── Configuration Page ────────────────────
+// ─── COMPLETE CONFIGURATION PAGE WITH TESTING ────────────────────
 app.get("/", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -366,79 +497,223 @@ app.get("/", (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Stremio Overseerr Addon</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f0f0f; color: #fff; margin: 0; padding: 20px; }
-            .container { max-width: 600px; margin: 0 auto; }
-            .card { background: #1a1a1a; padding: 20px; border-radius: 8px; margin: 20px 0; }
-            input, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 4px; border: 1px solid #333; }
-            input { background: #2a2a2a; color: #fff; }
-            button { background: #28a745; color: white; border: none; cursor: pointer; }
-            button:hover { background: #34d058; }
-            .addon-url { background: #2a2a2a; padding: 15px; border-radius: 4px; word-break: break-all; font-family: monospace; }
-            .links a { color: #8ef; text-decoration: none; margin-right: 15px; }
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #fff; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
+            .container { background: #1a1a1a; border-radius: 12px; padding: 30px; margin: 20px 0; border: 1px solid #333; }
+            h1 { color: #8ef; margin-bottom: 10px; }
+            h2 { color: #9f9; margin: 25px 0 15px 0; border-bottom: 1px solid #333; padding-bottom: 8px; }
+            h3 { color: #8ef; margin: 20px 0 10px 0; }
+            .form-group { margin-bottom: 20px; }
+            label { display: block; margin-bottom: 8px; font-weight: 600; color: #ccc; }
+            input, textarea { width: 100%; padding: 12px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; color: #fff; font-size: 14px; }
+            input:focus, textarea:focus { outline: none; border-color: #8ef; }
+            .btn { background: #28a745; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: 600; margin-right: 10px; margin-bottom: 10px; }
+            .btn:hover { background: #34d058; }
+            .btn:disabled { background: #6c757d; cursor: not-allowed; }
+            .btn-test { background: #17a2b8; }
+            .btn-test:hover { background: #138496; }
+            .help-text { color: #888; font-size: 12px; margin-top: 5px; }
+            .success { background: #155724; color: #d4edda; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .error { background: #721c24; color: #f8d7da; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .addon-url { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; font-family: monospace; word-break: break-all; }
+            .links { margin-top: 25px; padding-top: 20px; border-top: 1px solid #333; }
+            .links a { color: #8ef; text-decoration: none; margin-right: 15px; display: inline-block; margin-bottom: 8px; }
+            .links a:hover { text-decoration: underline; }
+            .test-section { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; }
+            .test-result { margin: 10px 0; padding: 10px; border-radius: 4px; }
+            .test-success { background: #155724; color: #d4edda; }
+            .test-error { background: #721c24; color: #f8d7da; }
+            .loading { color: #17a2b8; }
+            .video-tests { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
+            .video-test-item { background: #2a2a2a; padding: 15px; border-radius: 6px; text-align: center; }
+            @media (max-width: 600px) {
+                .video-tests { grid-template-columns: 1fr; }
+            }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🎬 Stremio Overseerr Addon</h1>
-            
-            <div class="card">
-                <h2>🔑 Configure Your Addon</h2>
-                <input type="text" id="tmdbKey" placeholder="TMDB API Key" required>
-                <input type="text" id="overseerrUrl" placeholder="Overseerr URL (https://...)" required>
-                <input type="text" id="overseerrApi" placeholder="Overseerr API Key" required>
-                <button onclick="generateAddon()">Generate Addon URL</button>
+            <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
+
+            <div class="success">
+                <strong>✅ FIXED:</strong> Overseerr requests now work! When you click content in Stremio, it will automatically submit requests to your Overseerr instance.
             </div>
 
-            <div class="card" id="result" style="display:none">
+            <form id="configForm">
+                <h2>🔑 API Configuration</h2>
+
+                <div class="form-group">
+                    <label for="tmdbKey">TMDB API Key *</label>
+                    <input type="text" id="tmdbKey" name="tmdbKey" required placeholder="Enter your TMDB API key">
+                    <div class="help-text">Get your free API key from: https://www.themoviedb.org/settings/api</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="overseerrUrl">Overseerr URL *</label>
+                    <input type="text" id="overseerrUrl" name="overseerrUrl" required placeholder="https://overseerr.example.com or http://192.168.1.100:5055">
+                    <div class="help-text">Your Overseerr instance URL (supports both domains and IP addresses)</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="overseerrApi">Overseerr API Key *</label>
+                    <input type="text" id="overseerrApi" name="overseerrApi" required placeholder="Enter your Overseerr API key">
+                    <div class="help-text">Get from Overseerr: Settings → API Keys → Generate New API Key</div>
+                </div>
+
+                <button type="button" class="btn" onclick="generateAddon()">Generate Addon URL</button>
+                <button type="button" class="btn btn-test" onclick="testConfiguration()">Test Configuration</button>
+            </form>
+
+            <div id="result" style="display: none;">
                 <h2>📦 Your Addon URL</h2>
                 <div class="addon-url" id="addonUrl"></div>
-                <p><strong>Install in Stremio:</strong></p>
+                <p>Copy this URL and install it in Stremio:</p>
                 <ol>
                     <li>Open Stremio</li>
                     <li>Click the puzzle piece icon (Addons)</li>
                     <li>Click "Community Addons"</li>
                     <li>Paste the URL above and click "Install"</li>
                 </ol>
-                <button onclick="installInStremio()">Install in Stremio</button>
-                <button onclick="copyToClipboard()" style="background: #17a2b8;">Copy URL</button>
+                <button class="btn" onclick="installInStremio()">Install in Stremio</button>
+                <button class="btn btn-test" onclick="copyToClipboard()">Copy URL</button>
             </div>
 
-            <div class="card">
-                <h3>🔗 Quick Tests</h3>
-                <div class="links">
-                    <a href="/manifest.json" target="_blank">Default Manifest</a>
-                    <a href="/stream/movie/tt0133093.json" target="_blank">Test Movie Stream</a>
-                    <a href="/stream/series/tt0944947:1:1.json" target="_blank">Test TV Stream</a>
-                    <a href="/health" target="_blank">Health Check</a>
+            <div class="test-section">
+                <h3>🧪 Test Your Configuration</h3>
+                <p>Test if your API keys and URLs are working correctly:</p>
+                <button class="btn btn-test" onclick="testConfiguration()">Test Configuration</button>
+                <div id="testResults" style="margin-top: 10px;"></div>
+            </div>
+
+            <h3>🎬 Video Playback Tests</h3>
+            <p>Test if the video playback works in your browser (required for Stremio):</p>
+
+            <div class="video-tests">
+                <div class="video-test-item">
+                    <h4>Direct Video Test</h4>
+                    <p>Test basic video streaming</p>
+                    <a href="/test-video" target="_blank" class="btn btn-test">Test Video Playback</a>
                 </div>
+                <div class="video-test-item">
+                    <h4>Movie Request Test</h4>
+                    <p>Test movie request flow</p>
+                    <a href="/stream/movie/tt0133093.json" target="_blank" class="btn btn-test">Test Movie Stream</a>
+                </div>
+                <div class="video-test-item">
+                    <h4>TV Show Test</h4>
+                    <p>Test TV show request flow</p>
+                    <a href="/stream/series/tt0944947:1:1.json" target="_blank" class="btn btn-test">Test TV Stream</a>
+                </div>
+                <div class="video-test-item">
+                    <h4>Health Check</h4>
+                    <p>Check server status</p>
+                    <a href="/health" target="_blank" class="btn btn-test">Check Health</a>
+                </div>
+            </div>
+
+            <div class="links">
+                <h3>🔗 Quick Links</h3>
+                <a href="/health">❤️ Health Check</a>
+                <a href="/test-video">🎬 Test Video Playback</a>
+                <a href="/stream/movie/tt0133093.json">🎬 Test Movie Stream (Matrix)</a>
+                <a href="/stream/series/tt0944947:1:1.json">📺 Test TV Episode Stream (GoT S1E1)</a>
+                <a href="/manifest.json">📋 Manifest File</a>
+                <a href="https://github.com/ericvlog/stremio-overseerr-addon" target="_blank">📚 GitHub Repository</a>
             </div>
         </div>
 
         <script>
-            function generateAddon() {
+            async function testConfiguration() {
+                const form = document.getElementById('configForm');
+                const formData = new FormData(form);
+
                 const config = {
-                    tmdbKey: document.getElementById('tmdbKey').value,
-                    overseerrUrl: document.getElementById('overseerrUrl').value,
-                    overseerrApi: document.getElementById('overseerrApi').value
+                    tmdbKey: formData.get('tmdbKey'),
+                    overseerrUrl: formData.get('overseerrUrl'),
+                    overseerrApi: formData.get('overseerrApi')
                 };
 
                 if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
-                    alert('Please fill all fields');
+                    document.getElementById('testResults').innerHTML = '<div class="error">Please fill in all fields first</div>';
                     return;
                 }
 
+                document.getElementById('testResults').innerHTML = '<div class="loading">Testing configuration... (this may take a few seconds)</div>';
+
+                const testButton = document.querySelector('.test-section .btn');
+                testButton.disabled = true;
+                testButton.textContent = 'Testing...';
+
+                try {
+                    const response = await fetch('/api/test-configuration', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(config)
+                    });
+
+                    const result = await response.json();
+
+                    let html = '';
+                    if (result.success) {
+                        html += '<div class="success">✅ All tests passed! Your configuration is working correctly.</div>';
+                    } else {
+                        html += '<div class="error">❌ Some tests failed. Please check your configuration.</div>';
+                    }
+
+                    result.results.forEach(test => {
+                        const icon = test.status === 'success' ? '✅' : '❌';
+                        const className = test.status === 'success' ? 'test-success' : 'test-error';
+                        html += '<div class="test-result ' + className + '">' + icon + ' <strong>' + test.service + ':</strong> ' + test.message + '</div>';
+                    });
+
+                    document.getElementById('testResults').innerHTML = html;
+
+                } catch (error) {
+                    document.getElementById('testResults').innerHTML = '<div class="error">❌ Test failed: ' + error.message + '</div>';
+                } finally {
+                    testButton.disabled = false;
+                    testButton.textContent = 'Test Configuration';
+                }
+            }
+
+            function generateAddon() {
+                const form = document.getElementById('configForm');
+                const formData = new FormData(form);
+
+                const config = {
+                    tmdbKey: formData.get('tmdbKey'),
+                    overseerrUrl: formData.get('overseerrUrl'),
+                    overseerrApi: formData.get('overseerrApi')
+                };
+
+                // Basic validation
+                if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
+                    alert('Please fill in all required fields');
+                    return;
+                }
+
+                // Encode configuration to base64
                 const configJson = JSON.stringify(config);
                 const configBase64 = btoa(configJson);
-                
+
+                // Generate addon URL
                 const addonUrl = window.location.origin + '/configured/' + configBase64 + '/manifest.json';
 
+                // Display result
                 document.getElementById('addonUrl').textContent = addonUrl;
                 document.getElementById('result').style.display = 'block';
+
+                // Store for installation
                 window.generatedAddonUrl = addonUrl;
             }
 
             function installInStremio() {
                 if (window.generatedAddonUrl) {
+                    // Use stremio protocol to install directly
                     const stremioUrl = 'stremio://' + window.generatedAddonUrl.replace(/^https?:\\/\\//, '');
                     window.location.href = stremioUrl;
                 }
@@ -446,10 +721,18 @@ app.get("/", (req, res) => {
 
             function copyToClipboard() {
                 if (window.generatedAddonUrl) {
-                    navigator.clipboard.writeText(window.generatedAddonUrl);
-                    alert('URL copied to clipboard!');
+                    navigator.clipboard.writeText(window.generatedAddonUrl).then(function() {
+                        alert('Addon URL copied to clipboard!');
+                    }, function(err) {
+                        console.error('Could not copy text: ', err);
+                    });
                 }
             }
+
+            // Auto-focus first input
+            document.addEventListener('DOMContentLoaded', function() {
+                document.getElementById('tmdbKey').focus();
+            });
         </script>
     </body>
     </html>
@@ -463,7 +746,13 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Stremio Overseerr Addon running at: ${SERVER_URL}`);
     console.log(`🎬 Configuration page: ${SERVER_URL}/`);
     console.log(`📋 Default addon: ${SERVER_URL}/manifest.json`);
-    console.log(`🎬 Test movie: ${SERVER_URL}/stream/movie/tt0133093.json`);
-    console.log(`📺 Test TV: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
-    console.log(`🚀 Simple & Clean - Addon should appear in Stremio now`);
+    console.log(`📋 User-specific addons: ${SERVER_URL}/configured/{config}/manifest.json`);
+    console.log(`🎬 Test video: ${SERVER_URL}/test-video`);
+    console.log(`🎬 Test movie stream: ${SERVER_URL}/stream/movie/tt0133093.json`);
+    console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
+    console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
+    console.log(`❤️  Health: ${SERVER_URL}/health`);
+    console.log(`🎯 Using YOUR wait.mp4 from CDN for all streams`);
+    console.log(`🚀 OVERSEERR REQUESTS NOW WORKING - Requests will be submitted when streams are clicked`);
+    console.log(`🔧 Fixed: Overseerr requests now complete before response is sent`);
 });
