@@ -368,6 +368,22 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
         }
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
+            if (streams.length === 0) {
+                // Fallback: always return a test stream for movies
+                if (type === 'movie') {
+                    console.log('[STREAM] No streams found, returning fallback test stream');
+                    streams.push({
+                        name: "Test Stream",
+                        title: `Test Stream for ${title}`,
+                        url: "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                        behaviorHints: {
+                            notWebReady: false,
+                            bingeGroup: `test-fallback-${tmdbId}`,
+                            runtime: "30 mins"
+                        }
+                    });
+                }
+            }
 
         // Only return the stream object, no request is made here
         res.json({
