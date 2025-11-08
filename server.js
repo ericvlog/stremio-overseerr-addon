@@ -75,15 +75,39 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
             mediaType: type === 'movie' ? 'movie' : 'tv'
         };
 
-        // ✅ FIXED: Handle series requests properly
+        // Series handling: support season requests and full-series requests
         if (type === 'series') {
             if (requestType === 'season' && seasonNumber !== null) {
-                // Request specific season
                 requestBody.seasons = [seasonNumber];
             } else if (requestType === 'series') {
-                // Request entire series - no seasons specified means all seasons
-                console.log(`[OVERSEERR] Requesting entire series: "${mediaName}"`);
-                // Don't include seasons array for entire series
+                // Full-series request: try to fetch season numbers from TMDB so Overseerr
+                // receives an explicit seasons array (avoids Overseerr server-side 500).
+                try {
+                    const tmdbKey = userConfig?.tmdbKey || process.env.TMDB_API_KEY || process.env.TMDB_KEY;
+                    if (tmdbKey) {
+                        const tmdbDetailsResp = await fetch(`https://api.themoviedb.org/3/tv/${encodeURIComponent(tmdbId)}?api_key=${encodeURIComponent(tmdbKey)}`);
+                        if (tmdbDetailsResp.ok) {
+                            const tmdbDetails = await tmdbDetailsResp.json();
+                            // Collect numeric season numbers, exclude season_number === 0 (specials)
+                            const seasons = (tmdbDetails.seasons || [])
+                                .map(s => Number(s.season_number))
+                                .filter(n => Number.isFinite(n) && n > 0);
+                            // If we found any seasons, send them; otherwise fallback to an empty array
+                            requestBody.seasons = seasons.length ? seasons : [];
+                            console.log(`[OVERSEERR] TMDB seasons resolved for ${mediaName}: [${requestBody.seasons.join(',')}]`);
+                        } else {
+                            console.warn(`[OVERSEERR] TMDB lookup failed (HTTP ${tmdbDetailsResp.status}) for TV ID ${tmdbId} - sending empty seasons array`);
+                            requestBody.seasons = [];
+                        }
+                    } else {
+                        // No TMDB key available in config or env: send empty seasons array
+                        console.warn('[OVERSEERR] No TMDB API key available; sending empty seasons array for full-series request');
+                        requestBody.seasons = [];
+                    }
+                } catch (err) {
+                    console.warn('[OVERSEERR] TMDB lookup error, sending empty seasons array', err && err.message ? err.message : err);
+                    requestBody.seasons = [];
+                }
             }
         }
 
