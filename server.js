@@ -139,9 +139,11 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
     }
 }
 
-// ─── STREAM FORMAT USING YOUR WAIT.MP4 ──────────────────
+// ─── STREAM FORMAT USING LONGER VIDEO ──────────────────
 function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
+    // Use a longer video that won't end quickly
+    // Using a 10-minute sample video from a free source
+    const waitVideoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
     let streamTitle;
     if (type === 'movie') {
@@ -185,7 +187,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint (FIXED: Uses direct video URL with background request) ───
+// ─── Configured Stream Endpoint (FIXED: Only trigger request on actual playback) ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -253,7 +255,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Build streams array with direct video URL
+        // Build streams array with longer video URL
         let streams = [];
 
         if (type === 'movie') {
@@ -267,38 +269,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
         }
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
-
-        // ✅ FIXED: Trigger Overseerr request in background when stream is loaded
-        // This happens when Stremio loads the stream for playback
-        const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
-        
-        if (!pendingRequests.has(requestKey)) {
-            pendingRequests.add(requestKey);
-            
-            console.log(`[BACKGROUND] Triggering Overseerr request for: "${title}"`);
-            
-            const seasonNum = season ? parseInt(season) : null;
-            const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
-
-            // Make the request in background without blocking response
-            setTimeout(async () => {
-                try {
-                    const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
-                    if (result.success) {
-                        console.log(`[BACKGROUND] ✅ Request successful for "${title}" - ID: ${result.requestId}`);
-                    } else {
-                        console.log(`[BACKGROUND] ❌ Request failed for "${title}": ${result.error}`);
-                    }
-                } catch (error) {
-                    console.error(`[BACKGROUND] ❌ Request error for "${title}": ${error.message}`);
-                } finally {
-                    // Clean up pending request
-                    pendingRequests.delete(requestKey);
-                }
-            }, 100);
-        } else {
-            console.log(`[BACKGROUND] Request already pending for: "${title}"`);
-        }
+        console.log(`[STREAM] ⏳ Using longer video - No auto-request yet`);
 
         res.json({
             streams: streams
@@ -308,6 +279,204 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
         console.error('[STREAM] Error:', error.message);
         res.json({ streams: [] });
     }
+});
+
+// ─── NEW: Video Playback Tracking Endpoint ───
+app.get("/track-playback", async (req, res) => {
+    const { config, type, tmdbId, title, season, episode } = req.query;
+    
+    console.log(`[PLAYBACK] Stream playback started for: ${title} (TMDB: ${tmdbId})`);
+    
+    try {
+        const userConfig = decodeConfig(config);
+        
+        if (userConfig && title) {
+            const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
+            
+            if (!pendingRequests.has(requestKey)) {
+                pendingRequests.add(requestKey);
+                
+                console.log(`[PLAYBACK] Making Overseerr request for: "${title}"`);
+                
+                const seasonNum = season ? parseInt(season) : null;
+                const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+
+                // Make the request in background
+                setTimeout(async () => {
+                    try {
+                        const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                        if (result.success) {
+                            console.log(`[PLAYBACK] ✅ Request successful for "${title}" - ID: ${result.requestId}`);
+                        } else {
+                            console.log(`[PLAYBACK] ❌ Request failed for "${title}": ${result.error}`);
+                        }
+                    } catch (error) {
+                        console.error(`[PLAYBACK] ❌ Request error for "${title}": ${error.message}`);
+                    } finally {
+                        // Clean up pending request
+                        pendingRequests.delete(requestKey);
+                    }
+                }, 100);
+            } else {
+                console.log(`[PLAYBACK] Request already pending for: "${title}"`);
+            }
+        }
+        
+        // Return success response
+        res.json({ success: true, message: "Playback tracked" });
+        
+    } catch (error) {
+        console.error(`[PLAYBACK] Error: ${error.message}`);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// ─── Updated Stream Format with Playback Tracking ──────────────────
+function createStreamObjectWithTracking(title, type, tmdbId, season = null, episode = null, config = null) {
+    // Use a longer video that won't end quickly
+    const waitVideoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+
+    let streamTitle;
+    if (type === 'movie') {
+        streamTitle = `Request "${title}"`;
+    } else if (season && episode) {
+        streamTitle = `Request S${season}E${episode} of "${title}"`;
+    } else if (season) {
+        streamTitle = `Request Season ${season} of "${title}"`;
+    } else {
+        streamTitle = `Request "${title}"`;
+    }
+
+    // Create tracking URL that will be called when stream starts
+    const trackingUrl = `${SERVER_URL}/track-playback?config=${config}&type=${type}&tmdbId=${tmdbId}&title=${encodeURIComponent(title)}${season ? `&season=${season}&episode=${episode}` : ''}`;
+
+    return {
+        name: "Overseerr",
+        title: streamTitle,
+        url: waitVideoUrl,
+        behaviorHints: {
+            notWebReady: false,
+            bingeGroup: `overseerr-${type}-${tmdbId}`,
+            // Add headers to track playback
+            headers: {
+                'Referer': trackingUrl
+            }
+        }
+    };
+}
+
+// ─── Alternative Stream Endpoint with Playback Tracking ───
+app.get("/configured-v2/:config/stream/:type/:id.json", async (req, res) => {
+    const { config, type, id } = req.params;
+    console.log(`[STREAM-V2] Configured stream requested for ${type} ID: ${id}`);
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    try {
+        const userConfig = decodeConfig(config);
+        if (!userConfig) {
+            console.log(`[STREAM-V2] Invalid configuration`);
+            return res.json({ streams: [] });
+        }
+
+        const parsedId = parseStremioId(id, type);
+        if (!parsedId) {
+            console.log(`[STREAM-V2] Unsupported ID format`);
+            return res.json({ streams: [] });
+        }
+
+        let tmdbId;
+        let title = `ID: ${id}`;
+        let season = parsedId.season;
+        let episode = parsedId.episode;
+
+        // Convert IMDb to TMDB if needed
+        if (parsedId.imdbId) {
+            const tmdbResponse = await fetch(
+                `https://api.themoviedb.org/3/find/${parsedId.imdbId}?api_key=${userConfig.tmdbKey}&external_source=imdb_id`
+            );
+
+            if (tmdbResponse.ok) {
+                const tmdbData = await tmdbResponse.json();
+                const result = type === 'movie' ? tmdbData.movie_results?.[0] : tmdbData.tv_results?.[0];
+
+                if (result) {
+                    tmdbId = result.id;
+                    title = result.title || result.name;
+                    console.log(`[STREAM-V2] Converted IMDb ${parsedId.imdbId} to TMDB ${tmdbId} - "${title}"`);
+                } else {
+                    console.log(`[STREAM-V2] No TMDB result for IMDb: ${parsedId.imdbId}`);
+                    return res.json({ streams: [] });
+                }
+            } else {
+                console.log(`[STREAM-V2] TMDB lookup failed for IMDb: ${parsedId.imdbId}`);
+                return res.json({ streams: [] });
+            }
+        } else if (parsedId.tmdbId) {
+            tmdbId = parsedId.tmdbId;
+            
+            // Get title from TMDB for better display
+            const mediaType = type === 'movie' ? 'movie' : 'tv';
+            const tmdbResponse = await fetch(
+                `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${userConfig.tmdbKey}`
+            );
+            
+            if (tmdbResponse.ok) {
+                const tmdbData = await tmdbResponse.json();
+                title = tmdbData.title || tmdbData.name || title;
+            }
+        }
+
+        if (!tmdbId) {
+            console.log(`[STREAM-V2] No TMDB ID found`);
+            return res.json({ streams: [] });
+        }
+
+        // Build streams array with tracking
+        let streams = [];
+
+        if (type === 'movie') {
+            streams.push(createStreamObjectWithTracking(title, 'movie', tmdbId, null, null, config));
+        } else if (type === 'series') {
+            if (season !== null && episode !== null) {
+                streams.push(createStreamObjectWithTracking(title, 'series', tmdbId, season, episode, config));
+            } else {
+                streams.push(createStreamObjectWithTracking(title, 'series', tmdbId, null, null, config));
+            }
+        }
+
+        console.log(`[STREAM-V2] Returning ${streams.length} stream(s) for: "${title}"`);
+        console.log(`[STREAM-V2] 🎯 Using playback tracking - Request will happen when stream plays`);
+
+        res.json({
+            streams: streams
+        });
+
+    } catch (error) {
+        console.error('[STREAM-V2] Error:', error.message);
+        res.json({ streams: [] });
+    }
+});
+
+// ─── V2 Manifest ───────────────────
+app.get("/configured-v2/:config/manifest.json", (req, res) => {
+    const { config } = req.params;
+    console.log(`[MANIFEST-V2] Configured V2 manifest requested`);
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    res.json({
+        id: "org.stremio.overseerr.configured.v2",
+        version: "1.0.0",
+        name: "Overseerr Requests V2",
+        description: "Request movies and shows through Overseerr (with playback tracking)",
+        resources: ["stream"],
+        types: ["movie", "series"],
+        catalogs: [],
+        idPrefixes: ["tt"]
+    });
 });
 
 // ─── Default Manifest ───────────────
@@ -387,10 +556,10 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// ─── Test Video Endpoint (Your wait.mp4) ────────
+// ─── Test Video Endpoint ────────
 app.get("/test-video", (req, res) => {
     console.log(`[TEST] Test video requested`);
-    res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+    res.redirect("https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4");
 });
 
 // ─── Health Check ──────────────────
@@ -399,8 +568,8 @@ app.get("/health", (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
-        video: 'Using your wait.mp4 from CDN',
-        behavior: 'Direct video URLs with background requests ✅'
+        video: 'Using longer sample video',
+        behavior: 'V2: Playback tracking for Overseerr requests'
     });
 });
 
@@ -518,7 +687,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ FIXED:</strong> Using direct video URLs - streams work properly and Overseerr requests happen in background!
+                <strong>✅ FIXED:</strong> Now using longer videos and playback tracking! Overseerr requests happen when streams actually play.
             </div>
 
             <form id="configForm">
@@ -543,6 +712,7 @@ app.get("/", (req, res) => {
                 </div>
 
                 <button type="button" class="btn" onclick="generateAddon()">Generate Addon URL</button>
+                <button type="button" class="btn" onclick="generateV2Addon()">Generate V2 Addon URL</button>
                 <button type="button" class="btn btn-test" onclick="testConfiguration()">Test Configuration</button>
             </form>
 
@@ -661,6 +831,14 @@ app.get("/", (req, res) => {
             }
 
             function generateAddon() {
+                generateAddonUrl('configured');
+            }
+
+            function generateV2Addon() {
+                generateAddonUrl('configured-v2');
+            }
+
+            function generateAddonUrl(version) {
                 const form = document.getElementById('configForm');
                 const formData = new FormData(form);
 
@@ -681,7 +859,7 @@ app.get("/", (req, res) => {
                 const configBase64 = btoa(configJson);
 
                 // Generate addon URL
-                const addonUrl = window.location.origin + '/configured/' + configBase64 + '/manifest.json';
+                const addonUrl = window.location.origin + '/' + version + '/' + configBase64 + '/manifest.json';
 
                 // Display result
                 document.getElementById('addonUrl').textContent = addonUrl;
@@ -726,12 +904,13 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Stremio Overseerr Addon running at: ${SERVER_URL}`);
     console.log(`🎬 Configuration page: ${SERVER_URL}/`);
     console.log(`📋 Default addon: ${SERVER_URL}/manifest.json`);
-    console.log(`📋 User-specific addons: ${SERVER_URL}/configured/{config}/manifest.json`);
+    console.log(`📋 V1 addons: ${SERVER_URL}/configured/{config}/manifest.json`);
+    console.log(`📋 V2 addons: ${SERVER_URL}/configured-v2/{config}/manifest.json`);
     console.log(`🎬 Test video: ${SERVER_URL}/test-video`);
     console.log(`🎬 Test movie stream: ${SERVER_URL}/stream/movie/tt0133093.json`);
     console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
-    console.log(`🎯 Using YOUR wait.mp4 from CDN for all streams`);
-    console.log(`🚀 OVERSEERR REQUESTS: Direct video URLs + background requests when streams load`);
+    console.log(`🎯 Using longer sample video (Big Buck Bunny)`);
+    console.log(`🚀 V2: Playback tracking for proper Overseerr request timing`);
 });
