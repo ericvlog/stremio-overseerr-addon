@@ -139,33 +139,6 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
     }
 }
 
-// ─── STREAM FORMAT USING LONGER VIDEO ──────────────────
-function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    // Use a longer video that won't end quickly
-    const waitVideoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
-
-    let streamTitle;
-    if (type === 'movie') {
-        streamTitle = `Request "${title}"`;
-    } else if (season && episode) {
-        streamTitle = `Request S${season}E${episode} of "${title}"`;
-    } else if (season) {
-        streamTitle = `Request Season ${season} of "${title}"`;
-    } else {
-        streamTitle = `Request "${title}"`;
-    }
-
-    return {
-        name: "Overseerr",
-        title: streamTitle,
-        url: waitVideoUrl,
-        behaviorHints: {
-            notWebReady: false,
-            bingeGroup: `overseerr-${type}-${tmdbId}`
-        }
-    };
-}
-
 // ─── Configured Manifest ───────────────────
 app.get("/configured/:config/manifest.json", (req, res) => {
     const { config } = req.params;
@@ -186,7 +159,157 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint (SIMPLE FIX: Trigger request when stream is loaded) ───
+// ─── PROXY STREAM ENDPOINT (This gets called when user clicks the stream) ───
+app.get("/proxy/:config/:type/:id", async (req, res) => {
+    const { config, type, id } = req.params;
+    const { season, episode } = req.query;
+    
+    console.log(`[PROXY] 🎬 Stream clicked for ${type} ID: ${id}`);
+    
+    try {
+        const userConfig = decodeConfig(config);
+        if (!userConfig) {
+            console.log(`[PROXY] Invalid configuration`);
+            return res.status(500).send("Invalid configuration");
+        }
+
+        const parsedId = parseStremioId(id, type);
+        if (!parsedId) {
+            console.log(`[PROXY] Unsupported ID format`);
+            return res.status(500).send("Unsupported ID format");
+        }
+
+        let tmdbId;
+        let title = `ID: ${id}`;
+
+        // Convert IMDb to TMDB if needed
+        if (parsedId.imdbId) {
+            const tmdbResponse = await fetch(
+                `https://api.themoviedb.org/3/find/${parsedId.imdbId}?api_key=${userConfig.tmdbKey}&external_source=imdb_id`
+            );
+
+            if (tmdbResponse.ok) {
+                const tmdbData = await tmdbResponse.json();
+                const result = type === 'movie' ? tmdbData.movie_results?.[0] : tmdbData.tv_results?.[0];
+
+                if (result) {
+                    tmdbId = result.id;
+                    title = result.title || result.name;
+                    console.log(`[PROXY] Converted IMDb ${parsedId.imdbId} to TMDB ${tmdbId} - "${title}"`);
+                } else {
+                    console.log(`[PROXY] No TMDB result for IMDb: ${parsedId.imdbId}`);
+                    return res.status(500).send("No TMDB result found");
+                }
+            } else {
+                console.log(`[PROXY] TMDB lookup failed for IMDb: ${parsedId.imdbId}`);
+                return res.status(500).send("TMDB lookup failed");
+            }
+        } else if (parsedId.tmdbId) {
+            tmdbId = parsedId.tmdbId;
+            
+            // Get title from TMDB for better display
+            const mediaType = type === 'movie' ? 'movie' : 'tv';
+            const tmdbResponse = await fetch(
+                `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${userConfig.tmdbKey}`
+            );
+            
+            if (tmdbResponse.ok) {
+                const tmdbData = await tmdbResponse.json();
+                title = tmdbData.title || tmdbData.name || title;
+            }
+        }
+
+        if (!tmdbId) {
+            console.log(`[PROXY] No TMDB ID found`);
+            return res.status(500).send("No TMDB ID found");
+        }
+
+        // ✅ TRIGGER OVERSEERR REQUEST WHEN STREAM IS CLICKED
+        const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
+        
+        if (!pendingRequests.has(requestKey)) {
+            pendingRequests.add(requestKey);
+            
+            console.log(`[PROXY] 🚀 Making Overseerr request for: "${title}"`);
+            
+            const seasonNum = season ? parseInt(season) : null;
+            const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+
+            // Make the request in background without blocking video
+            setTimeout(async () => {
+                try {
+                    const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                    if (result.success) {
+                        console.log(`[PROXY] ✅ Request successful for "${title}" - ID: ${result.requestId}`);
+                    } else {
+                        console.log(`[PROXY] ❌ Request failed for "${title}": ${result.error}`);
+                    }
+                } catch (error) {
+                    console.error(`[PROXY] ❌ Request error for "${title}": ${error.message}`);
+                } finally {
+                    // Clean up pending request
+                    pendingRequests.delete(requestKey);
+                }
+            }, 100);
+        } else {
+            console.log(`[PROXY] ⏳ Request already pending for: "${title}"`);
+        }
+
+        // Use a reliable video URL that works with Stremio
+        const videoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+        
+        console.log(`[PROXY] 📺 Streaming video for: "${title}"`);
+        
+        // Proxy the video - this is what Torrentio does
+        const videoResponse = await fetch(videoUrl);
+        
+        if (!videoResponse.ok) {
+            throw new Error(`Video fetch failed: ${videoResponse.status}`);
+        }
+
+        // Set appropriate headers for video streaming
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Content-Length', videoResponse.headers.get('content-length'));
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        // Pipe the video to response
+        videoResponse.body.pipe(res);
+
+    } catch (error) {
+        console.error('[PROXY] Error:', error.message);
+        res.status(500).send(`Error: ${error.message}`);
+    }
+});
+
+// ─── STREAM FORMAT USING PROXY URL ──────────────────
+function createStreamObject(title, type, tmdbId, season = null, episode = null, config = null) {
+    let streamTitle;
+    if (type === 'movie') {
+        streamTitle = `Request "${title}"`;
+    } else if (season && episode) {
+        streamTitle = `Request S${season}E${episode} of "${title}"`;
+    } else if (season) {
+        streamTitle = `Request Season ${season} of "${title}"`;
+    } else {
+        streamTitle = `Request "${title}"`;
+    }
+
+    // Create proxy URL that will trigger Overseerr when clicked
+    const proxyUrl = `${SERVER_URL}/proxy/${config}/${type}/${tmdbId}${season ? `?season=${season}&episode=${episode}` : ''}`;
+
+    return {
+        name: "Overseerr",
+        title: streamTitle,
+        url: proxyUrl,
+        behaviorHints: {
+            notWebReady: false,
+            bingeGroup: `overseerr-${type}-${tmdbId}`
+        }
+    };
+}
+
+// ─── Configured Stream Endpoint (Returns proxy streams) ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -254,52 +377,21 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Build streams array with longer video URL
+        // Build streams array with PROXY URLs
         let streams = [];
 
         if (type === 'movie') {
-            streams.push(createStreamObject(title, 'movie', tmdbId));
+            streams.push(createStreamObject(title, 'movie', tmdbId, null, null, config));
         } else if (type === 'series') {
             if (season !== null && episode !== null) {
-                streams.push(createStreamObject(title, 'series', tmdbId, season, episode));
+                streams.push(createStreamObject(title, 'series', tmdbId, season, episode, config));
             } else {
-                streams.push(createStreamObject(title, 'series', tmdbId));
+                streams.push(createStreamObject(title, 'series', tmdbId, null, null, config));
             }
         }
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
-
-        // ✅ SIMPLE FIX: Trigger Overseerr request when stream endpoint is called
-        // This happens when Stremio loads the stream for playback
-        const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
-        
-        if (!pendingRequests.has(requestKey)) {
-            pendingRequests.add(requestKey);
-            
-            console.log(`[STREAM] 🚀 Triggering Overseerr request for: "${title}"`);
-            
-            const seasonNum = season ? parseInt(season) : null;
-            const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
-
-            // Make the request in background without blocking response
-            setTimeout(async () => {
-                try {
-                    const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
-                    if (result.success) {
-                        console.log(`[STREAM] ✅ Request successful for "${title}" - ID: ${result.requestId}`);
-                    } else {
-                        console.log(`[STREAM] ❌ Request failed for "${title}": ${result.error}`);
-                    }
-                } catch (error) {
-                    console.error(`[STREAM] ❌ Request error for "${title}": ${error.message}`);
-                } finally {
-                    // Clean up pending request
-                    pendingRequests.delete(requestKey);
-                }
-            }, 100);
-        } else {
-            console.log(`[STREAM] ⏳ Request already pending for: "${title}"`);
-        }
+        console.log(`[STREAM] 🔄 Using proxy URLs - Requests happen when streams are clicked`);
 
         res.json({
             streams: streams
@@ -393,112 +485,6 @@ app.get("/test-video", (req, res) => {
     console.log(`[TEST] Test video requested`);
     res.redirect("https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4");
 });
-app.get("/test-video", async (req, res) => {
-    // Range-aware proxy: start Overseerr request in background and stream the wait.mp4
-    // to the client while honoring Range headers. This matches how torrentio/traktsync
-    // style addons behave: playback starts immediately (showing a waiting video)
-    // while the background request proceeds.
-    console.log(`[TEST] Test video requested with Overseerr processing`);
-    console.log('[TEST] query:', req.query);
-    console.log('[TEST] headers:', {
-        host: req.headers.host,
-        'user-agent': req.headers['user-agent'],
-        range: req.headers.range,
-        referer: req.headers.referer || req.headers.referrer
-    });
-
-    const { config, type, tmdbId, title, season, episode } = req.query;
-
-    // Kick off Overseerr request in background (non-blocking) so the client begins playback immediately.
-    if (config && type && tmdbId && title) {
-        const userConfig = decodeConfig(config);
-        if (userConfig) {
-            const requestKey = `${config}-${type}-${tmdbId}-${season}-${episode}`;
-
-            if (!pendingRequests.has(requestKey)) {
-                pendingRequests.add(requestKey);
-
-                (async () => {
-                    console.log(`[OVERSEERR] 🔄 Background request for "${title}"`);
-                    const seasonNum = season ? parseInt(season) : null;
-                    const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
-                    try {
-                        const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
-                        if (result.success) {
-                            console.log(`[OVERSEERR] ✅ Background request successful for "${title}" - ID: ${result.requestId}`);
-                        } else {
-                            console.error(`[OVERSEERR] ❌ Background request failed for "${title}": ${result.error}`);
-                        }
-                    } catch (err) {
-                        console.error(`[OVERSEERR] ❌ Background request error for "${title}":`, err && err.message ? err.message : err);
-                    } finally {
-                        pendingRequests.delete(requestKey);
-                        console.log(`[OVERSEERR] 🏁 Background processing completed for "${title}"`);
-                    }
-                })();
-            } else {
-                console.log(`[OVERSEERR] Background request already pending for: "${title}"`);
-            }
-        } else {
-            console.log('[TEST] Invalid user config in query string');
-        }
-    }
-
-    // Proxy the wait video from the CDN and stream it to the client while preserving Range behavior.
-    const waitUrl = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
-    try {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-
-        // Forward client's Range header if present
-        const forwardHeaders = {};
-        if (req.headers.range) forwardHeaders['Range'] = req.headers.range;
-        // Some clients require a User-Agent; forward what's provided
-        if (req.headers['user-agent']) forwardHeaders['User-Agent'] = req.headers['user-agent'];
-
-        const upstreamResp = await fetch(waitUrl, { headers: forwardHeaders });
-
-        // Copy relevant headers back to the client
-        const headerNames = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control', 'last-modified'];
-        headerNames.forEach(h => {
-            const v = upstreamResp.headers.get(h);
-            if (v) res.setHeader(h, v);
-        });
-
-        // Use the exact upstream status (200 or 206)
-        res.status(upstreamResp.status);
-
-        // Pipe the upstream response body to the client
-        const upstreamBody = upstreamResp.body;
-        if (upstreamBody && typeof upstreamBody.pipe === 'function') {
-            upstreamBody.pipe(res);
-        } else {
-            // Fallback: read as buffer then send
-            const buffer = await upstreamResp.buffer();
-            res.send(buffer);
-        }
-    } catch (err) {
-        console.error('[TEST] Proxy error:', err && err.message ? err.message : err);
-        // If proxy fails, fallback to a redirect so the client still receives a playable location
-        try {
-            res.status(302).redirect(waitUrl);
-        } catch (redirErr) {
-            console.error('[TEST] Redirect fallback failed:', redirErr && redirErr.message ? redirErr.message : redirErr);
-            res.status(502).send('Bad Gateway');
-        }
-    }
-});
-
-// Simple debug endpoint to verify that requests reach the Express app on the serverless host
-app.get('/debug-echo', (req, res) => {
-    console.log('[DEBUG] /debug-echo hit', { url: req.url, headers: req.headers });
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({ ok: true, url: req.url, headers: {
-        host: req.headers.host,
-        'user-agent': req.headers['user-agent'],
-        range: req.headers.range || null,
-        referer: req.headers.referer || req.headers.referrer || null
-    }});
-});
 
 // ─── Health Check ──────────────────
 app.get("/health", (req, res) => {
@@ -506,8 +492,8 @@ app.get("/health", (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
-        video: 'Using longer sample video (Big Buck Bunny)',
-        behavior: 'Simple approach: Requests when streams load ✅'
+        video: 'Using proxy streaming approach',
+        behavior: 'PROXY: Requests trigger when streams are clicked ✅'
     });
 });
 
@@ -625,7 +611,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ SIMPLE SOLUTION:</strong> Using longer videos and triggering Overseerr requests when streams load. Works reliably!
+                <strong>✅ PROXY SOLUTION:</strong> Using proxy streaming like Torrentio! Overseerr requests happen when you click streams, not when browsing.
             </div>
 
             <form id="configForm">
@@ -839,6 +825,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
-    console.log(`🎯 Using longer sample video (Big Buck Bunny)`);
-    console.log(`🚀 SIMPLE SOLUTION: Requests trigger when streams load, videos play properly`);
+    console.log(`🚀 PROXY SOLUTION: Using proxy streaming - requests trigger when streams are clicked!`);
+    console.log(`🔧 Stream URLs point to: ${SERVER_URL}/proxy/{config}/{type}/{id}`);
 });
