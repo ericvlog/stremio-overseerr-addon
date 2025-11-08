@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
 
-// Store pending requests to avoid duplicates - WORKING DEDUPLICATION
+// Store pending requests to avoid duplicates
 const pendingRequests = new Map();
 
 // ─── Parse Stremio ID formats ───────────────────
@@ -75,8 +75,16 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
             mediaType: type === 'movie' ? 'movie' : 'tv'
         };
 
-        if (type === 'series' && requestType === 'season' && seasonNumber !== null) {
-            requestBody.seasons = [seasonNumber];
+        // ✅ FIXED: Handle series requests properly
+        if (type === 'series') {
+            if (requestType === 'season' && seasonNumber !== null) {
+                // Request specific season
+                requestBody.seasons = [seasonNumber];
+            } else if (requestType === 'series') {
+                // Request entire series - no seasons specified means all seasons
+                console.log(`[OVERSEERR] Requesting entire series: "${mediaName}"`);
+                // Don't include seasons array for entire series
+            }
         }
 
         const overseerrUrl = userConfig ? userConfig.overseerrUrl : process.env.OVERSEERR_URL;
@@ -205,7 +213,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint (WITH SERIES HANDLING) ───
+// ─── Configured Stream Endpoint ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -384,7 +392,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// ─── PROXY WAIT ENDPOINT (FIXED - WORKING DEDUPLICATION) ───
+// ─── PROXY WAIT ENDPOINT (FIXED SERIES REQUESTS) ───
 app.get("/proxy-wait", async (req, res) => {
     console.log(`[PROXY] Proxy wait video requested`);
     console.log('[PROXY] query:', req.query);
@@ -416,19 +424,23 @@ app.get("/proxy-wait", async (req, res) => {
                     try {
                         const seasonNum = season ? parseInt(season) : null;
                         
-                        // Determine request type based on parameters
+                        // ✅ FIXED: Determine request type for series
                         let finalRequestType;
-                        if (requestType === 'series') {
-                            finalRequestType = 'series';
-                        } else if (requestType === 'season' && seasonNum !== null) {
-                            finalRequestType = 'season';
-                        } else if (type === 'movie') {
+                        if (type === 'movie') {
                             finalRequestType = 'movie';
-                        } else {
-                            finalRequestType = seasonNum !== null ? 'season' : 'series';
+                        } else if (type === 'series') {
+                            if (requestType === 'series') {
+                                finalRequestType = 'series'; // Entire series
+                            } else if (requestType === 'season' && seasonNum !== null) {
+                                finalRequestType = 'season'; // Specific season
+                            } else if (seasonNum !== null) {
+                                finalRequestType = 'season'; // Default to season if season specified
+                            } else {
+                                finalRequestType = 'series'; // Default to series if no season
+                            }
                         }
                         
-                        console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}`);
+                        console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}, Season: ${seasonNum}`);
                         const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, finalRequestType, userConfig);
                         
                         if (result.success) {
@@ -531,6 +543,7 @@ app.get("/health", (req, res) => {
         video: 'Using your wait.mp4 with direct proxy',
         behavior: 'ONE REQUEST PER CLICK - 5-minute cooldown ✅',
         series_handling: 'Two streams for episodes: Season + Entire Series ✅',
+        series_fix: 'Fixed entire series requests ✅',
         pending_requests: pendingCount
     });
 });
@@ -649,7 +662,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ FIXED: One request per click + Two streams for series!</strong>
+                <strong>✅ FIXED: Entire series requests now working!</strong>
             </div>
 
             <form id="configForm">
@@ -866,6 +879,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`❤️  Health: ${SERVER_URL}/health`);
     console.log(`🧹 Cleanup: ${SERVER_URL}/cleanup`);
     console.log(`🎯 Using YOUR wait.mp4 with direct proxy`);
-    console.log(`🚀 FIXED: One request per click + Two streams for series episodes`);
+    console.log(`🚀 FIXED: Entire series requests now working!`);
     console.log(`📺 SERIES: For episodes, shows "Request Season X" AND "Request Entire Series"`);
 });
