@@ -1,7 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
-import crypto from "crypto";
 
 dotenv.config();
 
@@ -9,13 +8,9 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
 
-// Unique instance id to help debug serverless concurrency (each cold instance will have a different id)
-const INSTANCE_ID = crypto.randomBytes(4).toString('hex');
-console.log(`INSTANCE_ID=${INSTANCE_ID} PID=${process.pid}`);
-
-// Store pending requests to avoid duplicates.
-// Use a Map to hold a timeout handle so we can auto-expire stale locks (serverless instances can crash).
+// Store pending requests to avoid duplicates - IMPROVED DEDUPLICATION
 const pendingRequests = new Map();
+const REQUEST_TTL = 30 * 60 * 1000; // 30 minutes TTL
 
 // ─── Parse Stremio ID formats ───────────────────
 function parseStremioId(id, type) {
@@ -202,7 +197,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint (SIMPLE FIX: Trigger request when stream is loaded) ───
+// ─── Configured Stream Endpoint ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -373,68 +368,66 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
+// ─── IMPROVED TEST VIDEO ENDPOINT WITH BETTER DEDUPLICATION ───
 app.get("/test-video", async (req, res) => {
-    // Range-aware proxy: start Overseerr request in background and stream the wait.mp4
-    // to the client while honoring Range headers. This matches how torrentio/traktsync
-    // style addons behave: playback starts immediately (showing a waiting video)
-    // while the background request proceeds.
-    console.log(`[TEST][INST:${INSTANCE_ID}] Test video requested with Overseerr processing`);
-    console.log(`[TEST][INST:${INSTANCE_ID}] query:`, req.query);
-    console.log(`[TEST][INST:${INSTANCE_ID}] headers:`, {
-        host: req.headers.host,
-        'user-agent': req.headers['user-agent'],
-        range: req.headers.range,
-        referer: req.headers.referer || req.headers.referrer
-    });
+    console.log(`[TEST] Test video requested with Overseerr processing`);
+    console.log('[TEST] query:', req.query);
 
     const { config, type, tmdbId, title, season, episode } = req.query;
 
-    // Kick off Overseerr request in background (non-blocking) so the client begins playback immediately.
+    // ✅ FIXED: IMPROVED DEDUPLICATION LOGIC
     if (config && type && tmdbId && title) {
         const userConfig = decodeConfig(config);
         if (userConfig) {
-            // Build a stable dedupe key using the Overseerr instance (URL+API key) and the media identifiers.
-            // This avoids duplicate background calls caused by base64 padding differences or title variations.
-            const overseerrUrlKey = (userConfig && userConfig.overseerrUrl) ? userConfig.overseerrUrl : (process.env.OVERSEERR_URL || '');
-            const overseerrApiKey = (userConfig && userConfig.overseerrApi) ? userConfig.overseerrApi : (process.env.OVERSEERR_API || '');
-            const requestKey = `${overseerrUrlKey}|${overseerrApiKey}|${type}|${tmdbId}|${season || ''}|${episode || ''}`;
-
-            console.log(`[OVERSEERR][INST:${INSTANCE_ID}] computed requestKey=${requestKey}`);
-
-            if (!pendingRequests.has(requestKey)) {
-                // Reserve the key and add a TTL in case the background job fails or the instance is terminated.
-                const ttlMs = 5 * 60 * 1000; // 5 minutes
+            // Create a more stable dedupe key that persists across range requests
+            const requestKey = `overseerr-${userConfig.overseerrUrl}-${userConfig.overseerrApi}-${type}-${tmdbId}-${season || ''}-${episode || ''}`;
+            
+            // Check if this is the initial request (not a range request)
+            const isInitialRequest = !req.headers.range || req.headers.range.startsWith('bytes=0-');
+            
+            if (isInitialRequest && !pendingRequests.has(requestKey)) {
+                console.log(`[OVERSEERR] 🔄 Starting NEW background request for: "${title}"`);
+                
+                // Set pending request with longer TTL
                 const timeout = setTimeout(() => {
                     pendingRequests.delete(requestKey);
-                    console.log(`[OVERSEERR][INST:${INSTANCE_ID}] 🕒 TTL expired, removed pending key: ${requestKey}`);
-                }, ttlMs);
+                    console.log(`[OVERSEERR] 🕒 TTL expired for: "${title}"`);
+                }, REQUEST_TTL);
+                
+                pendingRequests.set(requestKey, {
+                    timeout: timeout,
+                    timestamp: Date.now(),
+                    title: title
+                });
 
-                pendingRequests.set(requestKey, timeout);
-
+                // Make the Overseerr request in background
                 (async () => {
-                    console.log(`[OVERSEERR][INST:${INSTANCE_ID}] 🔄 Background request for "${title}" (tmdbId=${tmdbId}, type=${type})`);
-                    const seasonNum = season ? parseInt(season) : null;
-                    const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
                     try {
-                        console.log(`[OVERSEERR][INST:${INSTANCE_ID}] POST -> ${overseerrUrlKey}/api/v1/request (maskedApi=${overseerrApiKey ? overseerrApiKey.slice(0,4)+'...' : 'none'})`);
+                        const seasonNum = season ? parseInt(season) : null;
+                        const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+                        
+                        console.log(`[OVERSEERR] 🚀 Making API request for: "${title}"`);
                         const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                        
                         if (result.success) {
-                            console.log(`[OVERSEERR][INST:${INSTANCE_ID}] ✅ Background request successful for "${title}" - ID: ${result.requestId}`);
+                            console.log(`[OVERSEERR] ✅ SUCCESS: "${title}" - Request ID: ${result.requestId}`);
                         } else {
-                            console.error(`[OVERSEERR][INST:${INSTANCE_ID}] ❌ Background request failed for "${title}": ${result.error}`);
+                            console.error(`[OVERSEERR] ❌ FAILED: "${title}" - ${result.error}`);
                         }
                     } catch (err) {
-                        console.error(`[OVERSEERR][INST:${INSTANCE_ID}] ❌ Background request error for "${title}":`, err && err.message ? err.message : err);
+                        console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
                     } finally {
-                        // clear the TTL timer and remove the pending key
-                        const to = pendingRequests.get(requestKey);
-                        if (to) clearTimeout(to);
-                        pendingRequests.delete(requestKey);
-                        console.log(`[OVERSEERR][INST:${INSTANCE_ID}] 🏁 Background processing completed for "${title}"`);
+                        // Keep the request in memory for TTL to prevent duplicates
+                        // The timeout will automatically clean it up
+                        console.log(`[OVERSEERR] 🏁 Completed processing for: "${title}"`);
                     }
                 })();
+            } else if (isInitialRequest) {
+                const existingRequest = pendingRequests.get(requestKey);
+                const age = Date.now() - existingRequest.timestamp;
+                console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Already processing (${Math.floor(age/1000)}s ago)`);
             } else {
-                console.log(`[OVERSEERR][INST:${INSTANCE_ID}] Background request already pending for: "${title}" (deduped by key). pendingRequests.size=${pendingRequests.size}`);
+                console.log(`[OVERSEERR] 📦 RANGE REQUEST: "${title}" - Skipping duplicate check`);
             }
         } else {
             console.log('[TEST] Invalid user config in query string');
@@ -474,37 +467,57 @@ app.get("/test-video", async (req, res) => {
             res.send(buffer);
         }
     } catch (err) {
-        console.error('[TEST] Proxy error:', err && err.message ? err.message : err);
+        console.error('[TEST] Proxy error:', err.message);
         // If proxy fails, fallback to a redirect so the client still receives a playable location
         try {
             res.status(302).redirect(waitUrl);
         } catch (redirErr) {
-            console.error('[TEST] Redirect fallback failed:', redirErr && redirErr.message ? redirErr.message : redirErr);
+            console.error('[TEST] Redirect fallback failed:', redirErr.message);
             res.status(502).send('Bad Gateway');
         }
     }
 });
 
-// Simple debug endpoint to verify that requests reach the Express app on the serverless host
-app.get('/debug-echo', (req, res) => {
-    console.log('[DEBUG] /debug-echo hit', { url: req.url, headers: req.headers });
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.json({ ok: true, url: req.url, headers: {
-        host: req.headers.host,
-        'user-agent': req.headers['user-agent'],
-        range: req.headers.range || null,
-        referer: req.headers.referer || req.headers.referrer || null
-    }});
-});
-
-// ─── Health Check ──────────────────
+// ─── Health Check with Pending Requests Info ───
 app.get("/health", (req, res) => {
+    const pendingCount = pendingRequests.size;
+    const pendingList = Array.from(pendingRequests.entries()).map(([key, value]) => ({
+        key: key.substring(0, 50) + '...',
+        title: value.title,
+        age: Math.floor((Date.now() - value.timestamp) / 1000) + 's'
+    }));
+
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
         video: 'Using longer sample video (Big Buck Bunny)',
-        behavior: 'Simple approach: Requests when streams load ✅'
+        pending_requests: pendingCount,
+        pending_list: pendingList,
+        behavior: 'Improved deduplication - prevents multiple requests ✅'
+    });
+});
+
+// ─── Cleanup Endpoint (Optional) ───
+app.get("/cleanup", (req, res) => {
+    const beforeCount = pendingRequests.size;
+    
+    // Clean up expired requests
+    const now = Date.now();
+    for (const [key, value] of pendingRequests.entries()) {
+        if (now - value.timestamp > REQUEST_TTL) {
+            clearTimeout(value.timeout);
+            pendingRequests.delete(key);
+        }
+    }
+    
+    const afterCount = pendingRequests.size;
+    const cleaned = beforeCount - afterCount;
+    
+    res.json({
+        cleaned: cleaned,
+        remaining: afterCount,
+        message: `Cleaned ${cleaned} expired requests, ${afterCount} remaining`
     });
 });
 
@@ -622,7 +635,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ SIMPLE SOLUTION:</strong> Using longer videos and triggering Overseerr requests when streams load. Works reliably!
+                <strong>✅ DEDUPLICATION FIXED:</strong> Now prevents multiple requests for the same movie/show!
             </div>
 
             <form id="configForm">
@@ -700,6 +713,7 @@ app.get("/", (req, res) => {
             <div class="links">
                 <h3>🔗 Quick Links</h3>
                 <a href="/health">❤️ Health Check</a>
+                <a href="/cleanup">🧹 Cleanup Pending Requests</a>
                 <a href="/test-video">🎬 Test Video Playback</a>
                 <a href="/stream/movie/tt0133093.json">🎬 Test Movie Stream (Matrix)</a>
                 <a href="/stream/series/tt0944947:1:1.json">📺 Test TV Episode Stream (GoT S1E1)</a>
@@ -836,6 +850,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
+    console.log(`🧹 Cleanup: ${SERVER_URL}/cleanup`);
     console.log(`🎯 Using longer sample video (Big Buck Bunny)`);
-    console.log(`🚀 SIMPLE SOLUTION: Requests trigger when streams load, videos play properly`);
+    console.log(`🚀 DEDUPLICATION FIXED: Prevents multiple requests for same content`);
 });
