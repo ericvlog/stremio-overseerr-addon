@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
 
-// Store pending requests with timestamps - REMOVED COOLDOWN
+// Store pending requests to avoid duplicates - WORKING DEDUPLICATION
 const pendingRequests = new Map();
 
 // ─── Parse Stremio ID formats ───────────────────
@@ -168,7 +168,7 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null, 
         title: title,
         season: season || '',
         episode: episode || '',
-        requestType: requestType // Add request type to distinguish between season/series requests
+        requestType: requestType
     });
 
     // Point to our proxy endpoint that will handle the request
@@ -205,7 +205,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint (IMPROVED SERIES HANDLING) ───
+// ─── Configured Stream Endpoint (WITH SERIES HANDLING) ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -281,7 +281,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             streams.push(createStreamObject(title, 'movie', tmdbId, null, null, config, 'movie'));
         } else if (type === 'series') {
             if (season !== null && episode !== null) {
-                // ✅ FIXED: For specific episodes, show TWO streams
+                // ✅ For specific episodes, show TWO streams
                 // Stream 1: Request this specific season
                 streams.push(createStreamObject(title, 'series', tmdbId, season, null, config, 'season'));
                 // Stream 2: Request entire series
@@ -371,7 +371,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
             if (parsedId.season !== null) {
                 streams.push(createStreamObject(title, 'series', tmdbId, parsedId.season, parsedId.episode));
             } else {
-                streams.push(createStreamObject(title, 'series', tmdbId, null, null, config, 'series'));
+                streams.push(createStreamObject(title, 'series', tmdbId, null, null, '', 'series'));
             }
         }
 
@@ -384,55 +384,72 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// ─── PROXY WAIT ENDPOINT (FIXED - NO COOLDOWN) ───
+// ─── PROXY WAIT ENDPOINT (FIXED - WORKING DEDUPLICATION) ───
 app.get("/proxy-wait", async (req, res) => {
     console.log(`[PROXY] Proxy wait video requested`);
     console.log('[PROXY] query:', req.query);
 
     const { config, type, tmdbId, title, season, episode, requestType } = req.query;
 
-    // ✅ FIXED: Make Overseerr request EVERY TIME (no cooldown)
-    if (config && type && tmdbId && title) {
+    // ✅ FIXED: Only trigger Overseerr on INITIAL request (not range requests)
+    const isInitialRequest = !req.headers.range || req.headers.range.startsWith('bytes=0-');
+    
+    if (isInitialRequest && config && type && tmdbId && title) {
         const userConfig = decodeConfig(config);
         if (userConfig) {
-            // Create request key that includes the request type for better tracking
+            // Create request key that includes the request type
             const requestKey = `req-${userConfig.overseerrUrl}-${userConfig.overseerrApi}-${type}-${tmdbId}-${season || ''}-${episode || ''}-${requestType || 'auto'}`;
             
-            console.log(`[OVERSEERR] 🚀 Making request for: "${title}" (Type: ${requestType || 'auto'})`);
+            // Check if this request was already made (5-minute cooldown)
+            const now = Date.now();
+            const lastRequest = pendingRequests.get(requestKey);
+            const FIVE_MINUTES = 5 * 60 * 1000;
             
-            // Make the Overseerr request in background (don't wait for it)
-            (async () => {
-                try {
-                    const seasonNum = season ? parseInt(season) : null;
-                    
-                    // Determine request type based on parameters
-                    let finalRequestType;
-                    if (requestType === 'series') {
-                        finalRequestType = 'series';
-                    } else if (requestType === 'season' && seasonNum !== null) {
-                        finalRequestType = 'season';
-                    } else if (type === 'movie') {
-                        finalRequestType = 'movie';
-                    } else {
-                        finalRequestType = seasonNum !== null ? 'season' : 'series';
+            if (!lastRequest || (now - lastRequest) > FIVE_MINUTES) {
+                console.log(`[OVERSEERR] 🚀 Making request for: "${title}" (Type: ${requestType || 'auto'})`);
+                
+                // Store the request timestamp
+                pendingRequests.set(requestKey, now);
+                
+                // Make the Overseerr request in background
+                (async () => {
+                    try {
+                        const seasonNum = season ? parseInt(season) : null;
+                        
+                        // Determine request type based on parameters
+                        let finalRequestType;
+                        if (requestType === 'series') {
+                            finalRequestType = 'series';
+                        } else if (requestType === 'season' && seasonNum !== null) {
+                            finalRequestType = 'season';
+                        } else if (type === 'movie') {
+                            finalRequestType = 'movie';
+                        } else {
+                            finalRequestType = seasonNum !== null ? 'season' : 'series';
+                        }
+                        
+                        console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}`);
+                        const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, finalRequestType, userConfig);
+                        
+                        if (result.success) {
+                            console.log(`[OVERSEERR] ✅ SUCCESS: "${title}" - Request ID: ${result.requestId}`);
+                        } else {
+                            console.error(`[OVERSEERR] ❌ FAILED: "${title}" - ${result.error}`);
+                        }
+                    } catch (err) {
+                        console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
                     }
-                    
-                    console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}`);
-                    const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, finalRequestType, userConfig);
-                    
-                    if (result.success) {
-                        console.log(`[OVERSEERR] ✅ SUCCESS: "${title}" - Request ID: ${result.requestId}`);
-                    } else {
-                        console.error(`[OVERSEERR] ❌ FAILED: "${title}" - ${result.error}`);
-                    }
-                } catch (err) {
-                    console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
-                }
-            })();
+                })();
+            } else {
+                const timeSince = (now - lastRequest) / 1000;
+                console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${Math.floor(timeSince)}s ago`);
+            }
         }
+    } else if (!isInitialRequest) {
+        console.log(`[PROXY] Range request - skipping Overseerr trigger`);
     }
 
-    // ✅ Proxy your wait.mp4 directly (NO REDIRECT)
+    // ✅ Proxy your wait.mp4 directly
     const waitUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
     
     try {
@@ -472,7 +489,7 @@ app.get("/proxy-wait", async (req, res) => {
             res.send(buffer);
         }
 
-        console.log(`[PROXY] ✅ Streaming your wait.mp4 for: "${title}"`);
+        console.log(`[PROXY] ✅ Streaming your wait.mp4 for: "${title || 'unknown'}"`);
 
     } catch (error) {
         console.error('[PROXY] Error:', error.message);
@@ -481,15 +498,40 @@ app.get("/proxy-wait", async (req, res) => {
     }
 });
 
+// ─── Cleanup Endpoint ───
+app.get("/cleanup", (req, res) => {
+    const beforeCount = pendingRequests.size;
+    
+    // Clean up old requests (older than 1 hour)
+    const oneHourAgo = Date.now() - (60 * 60 * 1000);
+    for (const [key, timestamp] of pendingRequests.entries()) {
+        if (timestamp < oneHourAgo) {
+            pendingRequests.delete(key);
+        }
+    }
+    
+    const afterCount = pendingRequests.size;
+    const cleaned = beforeCount - afterCount;
+    
+    res.json({
+        cleaned: cleaned,
+        remaining: afterCount,
+        message: `Cleaned ${cleaned} old requests, ${afterCount} remaining`
+    });
+});
+
 // ─── Health Check ──────────────────
 app.get("/health", (req, res) => {
+    const pendingCount = pendingRequests.size;
+    
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
         video: 'Using your wait.mp4 with direct proxy',
-        behavior: 'NO COOLDOWN - Every click makes a request ✅',
-        series_handling: 'Two streams for episodes: Season + Entire Series ✅'
+        behavior: 'ONE REQUEST PER CLICK - 5-minute cooldown ✅',
+        series_handling: 'Two streams for episodes: Season + Entire Series ✅',
+        pending_requests: pendingCount
     });
 });
 
@@ -607,7 +649,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ FIXED BEHAVIOR:</strong> No cooldown + Two streams for series episodes (Season + Entire Series)!
+                <strong>✅ FIXED: One request per click + Two streams for series!</strong>
             </div>
 
             <form id="configForm">
@@ -685,6 +727,7 @@ app.get("/", (req, res) => {
             <div class="links">
                 <h3>🔗 Quick Links</h3>
                 <a href="/health">❤️ Health Check</a>
+                <a href="/cleanup">🧹 Cleanup Pending Requests</a>
                 <a href="/proxy-wait">🎬 Test Video Playback</a>
                 <a href="/stream/movie/tt0133093.json">🎬 Test Movie Stream (Matrix)</a>
                 <a href="/stream/series/tt0944947:1:1.json">📺 Test TV Episode Stream (GoT S1E1)</a>
@@ -821,7 +864,8 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
+    console.log(`🧹 Cleanup: ${SERVER_URL}/cleanup`);
     console.log(`🎯 Using YOUR wait.mp4 with direct proxy`);
-    console.log(`🚀 FIXED: No cooldown + Two streams for series episodes`);
+    console.log(`🚀 FIXED: One request per click + Two streams for series episodes`);
     console.log(`📺 SERIES: For episodes, shows "Request Season X" AND "Request Entire Series"`);
 });
