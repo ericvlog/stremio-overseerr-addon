@@ -8,6 +8,10 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
 
+// Store pending requests to avoid duplicates.
+// Use a Map to hold a timeout handle so we can auto-expire stale locks (serverless instances can crash).
+const pendingRequests = new Map();
+
 // ─── Parse Stremio ID formats ───────────────────
 function parseStremioId(id, type) {
     console.log(`[PARSER] Parsing ID: ${id} for type: ${type}`);
@@ -136,10 +140,10 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
     }
 }
 
-// ─── STREAM FORMAT USING YOUR WAIT.MP4 ──────────────────
-function createStreamObject(title, type, tmdbId, season = null, episode = null) {
-    const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
-
+// ─── STREAM FORMAT USING LONGER VIDEO ──────────────────
+function createStreamObject(title, type, tmdbId, season = null, episode = null, config = '') {
+    // Build a stream object that points to our /test-video endpoint on this server.
+    // The actual Overseerr request will be performed when the player fetches this URL (on click/playback).
     let streamTitle;
     if (type === 'movie') {
         streamTitle = `Request "${title}"`;
@@ -150,6 +154,17 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null) 
     } else {
         streamTitle = `Request "${title}"`;
     }
+
+    const params = new URLSearchParams({
+        config: config || '',
+        type: type,
+        tmdbId: tmdbId,
+        title: title,
+        season: season || '',
+        episode: episode || ''
+    });
+
+    const waitVideoUrl = `${SERVER_URL}/test-video?${params.toString()}`;
 
     return {
         name: "Overseerr",
@@ -182,7 +197,7 @@ app.get("/configured/:config/manifest.json", (req, res) => {
     });
 });
 
-// ─── Configured Stream Endpoint (FIXED: No auto-request) ───
+// ─── Configured Stream Endpoint (SIMPLE FIX: Trigger request when stream is loaded) ───
 app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
     const { config, type, id } = req.params;
     console.log(`[STREAM] Configured stream requested for ${type} ID: ${id}`);
@@ -250,25 +265,25 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Build streams array - NO AUTO-REQUEST
+        // Build streams array with longer video URL
         let streams = [];
 
         if (type === 'movie') {
-            streams.push(createStreamObject(title, 'movie', tmdbId));
+            streams.push(createStreamObject(title, 'movie', tmdbId, null, null, config));
         } else if (type === 'series') {
             if (season !== null && episode !== null) {
-                streams.push(createStreamObject(title, 'series', tmdbId, season, episode));
+                streams.push(createStreamObject(title, 'series', tmdbId, season, episode, config));
             } else {
-                streams.push(createStreamObject(title, 'series', tmdbId));
+                streams.push(createStreamObject(title, 'series', tmdbId, null, null, config));
             }
         }
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
-        console.log(`[STREAM] ✅ No auto-request - Request will only happen when user clicks stream`);
 
-        res.json({
-            streams: streams
-        });
+        // Do NOT trigger Overseerr here. The request will be triggered when the player
+        // fetches the /test-video URL (on click/playback). This avoids making requests
+        // when Stremio only lists or inspects streams.
+        res.json({ streams: streams });
 
     } catch (error) {
         console.error('[STREAM] Error:', error.message);
@@ -353,10 +368,125 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// ─── Test Video Endpoint (Your wait.mp4) ────────
-app.get("/test-video", (req, res) => {
-    console.log(`[TEST] Test video requested`);
-    res.redirect("https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4");
+app.get("/test-video", async (req, res) => {
+    // Range-aware proxy: start Overseerr request in background and stream the wait.mp4
+    // to the client while honoring Range headers. This matches how torrentio/traktsync
+    // style addons behave: playback starts immediately (showing a waiting video)
+    // while the background request proceeds.
+    console.log(`[TEST] Test video requested with Overseerr processing`);
+    console.log('[TEST] query:', req.query);
+    console.log('[TEST] headers:', {
+        host: req.headers.host,
+        'user-agent': req.headers['user-agent'],
+        range: req.headers.range,
+        referer: req.headers.referer || req.headers.referrer
+    });
+
+    const { config, type, tmdbId, title, season, episode } = req.query;
+
+    // Kick off Overseerr request in background (non-blocking) so the client begins playback immediately.
+    if (config && type && tmdbId && title) {
+        const userConfig = decodeConfig(config);
+        if (userConfig) {
+            // Build a stable dedupe key using the Overseerr instance (URL+API key) and the media identifiers.
+            // This avoids duplicate background calls caused by base64 padding differences or title variations.
+            const overseerrUrlKey = (userConfig && userConfig.overseerrUrl) ? userConfig.overseerrUrl : (process.env.OVERSEERR_URL || '');
+            const overseerrApiKey = (userConfig && userConfig.overseerrApi) ? userConfig.overseerrApi : (process.env.OVERSEERR_API || '');
+            const requestKey = `${overseerrUrlKey}|${overseerrApiKey}|${type}|${tmdbId}|${season || ''}|${episode || ''}`;
+
+            if (!pendingRequests.has(requestKey)) {
+                // Reserve the key and add a TTL in case the background job fails or the instance is terminated.
+                const ttlMs = 5 * 60 * 1000; // 5 minutes
+                const timeout = setTimeout(() => {
+                    pendingRequests.delete(requestKey);
+                    console.log(`[OVERSEERR] 🕒 TTL expired, removed pending key: ${requestKey}`);
+                }, ttlMs);
+
+                pendingRequests.set(requestKey, timeout);
+
+                (async () => {
+                    console.log(`[OVERSEERR] 🔄 Background request for "${title}"`);
+                    const seasonNum = season ? parseInt(season) : null;
+                    const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
+                    try {
+                        const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
+                        if (result.success) {
+                            console.log(`[OVERSEERR] ✅ Background request successful for "${title}" - ID: ${result.requestId}`);
+                        } else {
+                            console.error(`[OVERSEERR] ❌ Background request failed for "${title}": ${result.error}`);
+                        }
+                    } catch (err) {
+                        console.error(`[OVERSEERR] ❌ Background request error for "${title}":`, err && err.message ? err.message : err);
+                    } finally {
+                        // clear the TTL timer and remove the pending key
+                        const to = pendingRequests.get(requestKey);
+                        if (to) clearTimeout(to);
+                        pendingRequests.delete(requestKey);
+                        console.log(`[OVERSEERR] 🏁 Background processing completed for "${title}"`);
+                    }
+                })();
+            } else {
+                console.log(`[OVERSEERR] Background request already pending for: "${title}" (deduped by key)`);
+            }
+        } else {
+            console.log('[TEST] Invalid user config in query string');
+        }
+    }
+
+    // Proxy the wait video from the CDN and stream it to the client while preserving Range behavior.
+    const waitUrl = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+    try {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        // Forward client's Range header if present
+        const forwardHeaders = {};
+        if (req.headers.range) forwardHeaders['Range'] = req.headers.range;
+        // Some clients require a User-Agent; forward what's provided
+        if (req.headers['user-agent']) forwardHeaders['User-Agent'] = req.headers['user-agent'];
+
+        const upstreamResp = await fetch(waitUrl, { headers: forwardHeaders });
+
+        // Copy relevant headers back to the client
+        const headerNames = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control', 'last-modified'];
+        headerNames.forEach(h => {
+            const v = upstreamResp.headers.get(h);
+            if (v) res.setHeader(h, v);
+        });
+
+        // Use the exact upstream status (200 or 206)
+        res.status(upstreamResp.status);
+
+        // Pipe the upstream response body to the client
+        const upstreamBody = upstreamResp.body;
+        if (upstreamBody && typeof upstreamBody.pipe === 'function') {
+            upstreamBody.pipe(res);
+        } else {
+            // Fallback: read as buffer then send
+            const buffer = await upstreamResp.buffer();
+            res.send(buffer);
+        }
+    } catch (err) {
+        console.error('[TEST] Proxy error:', err && err.message ? err.message : err);
+        // If proxy fails, fallback to a redirect so the client still receives a playable location
+        try {
+            res.status(302).redirect(waitUrl);
+        } catch (redirErr) {
+            console.error('[TEST] Redirect fallback failed:', redirErr && redirErr.message ? redirErr.message : redirErr);
+            res.status(502).send('Bad Gateway');
+        }
+    }
+});
+
+// Simple debug endpoint to verify that requests reach the Express app on the serverless host
+app.get('/debug-echo', (req, res) => {
+    console.log('[DEBUG] /debug-echo hit', { url: req.url, headers: req.headers });
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json({ ok: true, url: req.url, headers: {
+        host: req.headers.host,
+        'user-agent': req.headers['user-agent'],
+        range: req.headers.range || null,
+        referer: req.headers.referer || req.headers.referrer || null
+    }});
 });
 
 // ─── Health Check ──────────────────
@@ -365,7 +495,8 @@ app.get("/health", (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
-        video: 'Using your wait.mp4 from CDN'
+        video: 'Using longer sample video (Big Buck Bunny)',
+        behavior: 'Simple approach: Requests when streams load ✅'
     });
 });
 
@@ -483,7 +614,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ FIXED:</strong> Overseerr requests now only happen when you click streams, not when browsing movies!
+                <strong>✅ SIMPLE SOLUTION:</strong> Using longer videos and triggering Overseerr requests when streams load. Works reliably!
             </div>
 
             <form id="configForm">
@@ -697,6 +828,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📺 Test TV stream: ${SERVER_URL}/stream/series/tt0944947:1:1.json`);
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
-    console.log(`🎯 Using YOUR wait.mp4 from CDN for all streams`);
-    console.log(`🚀 OVERSEERR REQUESTS: No auto-requests - only when streams are clicked`);
+    console.log(`🎯 Using longer sample video (Big Buck Bunny)`);
+    console.log(`🚀 SIMPLE SOLUTION: Requests trigger when streams load, videos play properly`);
 });
