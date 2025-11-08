@@ -1,12 +1,17 @@
 import express from "express";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import crypto from "crypto";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 7000;
 const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
+
+// Unique instance id to help debug serverless concurrency (each cold instance will have a different id)
+const INSTANCE_ID = crypto.randomBytes(4).toString('hex');
+console.log(`INSTANCE_ID=${INSTANCE_ID} PID=${process.pid}`);
 
 // Store pending requests to avoid duplicates.
 // Use a Map to hold a timeout handle so we can auto-expire stale locks (serverless instances can crash).
@@ -373,9 +378,9 @@ app.get("/test-video", async (req, res) => {
     // to the client while honoring Range headers. This matches how torrentio/traktsync
     // style addons behave: playback starts immediately (showing a waiting video)
     // while the background request proceeds.
-    console.log(`[TEST] Test video requested with Overseerr processing`);
-    console.log('[TEST] query:', req.query);
-    console.log('[TEST] headers:', {
+    console.log(`[TEST][INST:${INSTANCE_ID}] Test video requested with Overseerr processing`);
+    console.log(`[TEST][INST:${INSTANCE_ID}] query:`, req.query);
+    console.log(`[TEST][INST:${INSTANCE_ID}] headers:`, {
         host: req.headers.host,
         'user-agent': req.headers['user-agent'],
         range: req.headers.range,
@@ -394,39 +399,42 @@ app.get("/test-video", async (req, res) => {
             const overseerrApiKey = (userConfig && userConfig.overseerrApi) ? userConfig.overseerrApi : (process.env.OVERSEERR_API || '');
             const requestKey = `${overseerrUrlKey}|${overseerrApiKey}|${type}|${tmdbId}|${season || ''}|${episode || ''}`;
 
+            console.log(`[OVERSEERR][INST:${INSTANCE_ID}] computed requestKey=${requestKey}`);
+
             if (!pendingRequests.has(requestKey)) {
                 // Reserve the key and add a TTL in case the background job fails or the instance is terminated.
                 const ttlMs = 5 * 60 * 1000; // 5 minutes
                 const timeout = setTimeout(() => {
                     pendingRequests.delete(requestKey);
-                    console.log(`[OVERSEERR] 🕒 TTL expired, removed pending key: ${requestKey}`);
+                    console.log(`[OVERSEERR][INST:${INSTANCE_ID}] 🕒 TTL expired, removed pending key: ${requestKey}`);
                 }, ttlMs);
 
                 pendingRequests.set(requestKey, timeout);
 
                 (async () => {
-                    console.log(`[OVERSEERR] 🔄 Background request for "${title}"`);
+                    console.log(`[OVERSEERR][INST:${INSTANCE_ID}] 🔄 Background request for "${title}" (tmdbId=${tmdbId}, type=${type})`);
                     const seasonNum = season ? parseInt(season) : null;
                     const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
                     try {
+                        console.log(`[OVERSEERR][INST:${INSTANCE_ID}] POST -> ${overseerrUrlKey}/api/v1/request (maskedApi=${overseerrApiKey ? overseerrApiKey.slice(0,4)+'...' : 'none'})`);
                         const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
                         if (result.success) {
-                            console.log(`[OVERSEERR] ✅ Background request successful for "${title}" - ID: ${result.requestId}`);
+                            console.log(`[OVERSEERR][INST:${INSTANCE_ID}] ✅ Background request successful for "${title}" - ID: ${result.requestId}`);
                         } else {
-                            console.error(`[OVERSEERR] ❌ Background request failed for "${title}": ${result.error}`);
+                            console.error(`[OVERSEERR][INST:${INSTANCE_ID}] ❌ Background request failed for "${title}": ${result.error}`);
                         }
                     } catch (err) {
-                        console.error(`[OVERSEERR] ❌ Background request error for "${title}":`, err && err.message ? err.message : err);
+                        console.error(`[OVERSEERR][INST:${INSTANCE_ID}] ❌ Background request error for "${title}":`, err && err.message ? err.message : err);
                     } finally {
                         // clear the TTL timer and remove the pending key
                         const to = pendingRequests.get(requestKey);
                         if (to) clearTimeout(to);
                         pendingRequests.delete(requestKey);
-                        console.log(`[OVERSEERR] 🏁 Background processing completed for "${title}"`);
+                        console.log(`[OVERSEERR][INST:${INSTANCE_ID}] 🏁 Background processing completed for "${title}"`);
                     }
                 })();
             } else {
-                console.log(`[OVERSEERR] Background request already pending for: "${title}" (deduped by key)`);
+                console.log(`[OVERSEERR][INST:${INSTANCE_ID}] Background request already pending for: "${title}" (deduped by key). pendingRequests.size=${pendingRequests.size}`);
             }
         } else {
             console.log('[TEST] Invalid user config in query string');
