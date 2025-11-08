@@ -8,9 +8,8 @@ const app = express();
 const PORT = process.env.PORT || 7000;
 const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
 
-// Store pending requests to avoid duplicates - IMPROVED DEDUPLICATION
+// Store pending requests with timestamps
 const pendingRequests = new Map();
-const REQUEST_TTL = 30 * 60 * 1000; // 30 minutes TTL
 
 // ─── Parse Stremio ID formats ───────────────────
 function parseStremioId(id, type) {
@@ -140,10 +139,11 @@ async function makeOverseerrRequest(tmdbId, type, mediaName, seasonNumber = null
     }
 }
 
-// ─── STREAM FORMAT USING LONGER VIDEO ──────────────────
+// ─── STREAM FORMAT USING YOUR WAIT.MP4 ──────────────────
 function createStreamObject(title, type, tmdbId, season = null, episode = null, config = '') {
-    // Build a stream object that points to our /test-video endpoint on this server.
-    // The actual Overseerr request will be performed when the player fetches this URL (on click/playback).
+    // Use YOUR wait.mp4 from the CDN
+    const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
+
     let streamTitle;
     if (type === 'movie') {
         streamTitle = `Request "${title}"`;
@@ -164,12 +164,13 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null, 
         episode: episode || ''
     });
 
-    const waitVideoUrl = `${SERVER_URL}/test-video?${params.toString()}`;
+    // Use your original wait.mp4 URL with parameters
+    const finalVideoUrl = `${waitVideoUrl}?${params.toString()}`;
 
     return {
         name: "Overseerr",
         title: streamTitle,
-        url: waitVideoUrl,
+        url: finalVideoUrl,
         behaviorHints: {
             notWebReady: false,
             bingeGroup: `overseerr-${type}-${tmdbId}`
@@ -265,7 +266,7 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
             return res.json({ streams: [] });
         }
 
-        // Build streams array with longer video URL
+        // Build streams array with your original wait.mp4
         let streams = [];
 
         if (type === 'movie') {
@@ -280,9 +281,6 @@ app.get("/configured/:config/stream/:type/:id.json", async (req, res) => {
 
         console.log(`[STREAM] Returning ${streams.length} stream(s) for: "${title}"`);
 
-        // Do NOT trigger Overseerr here. The request will be triggered when the player
-        // fetches the /test-video URL (on click/playback). This avoids making requests
-        // when Stremio only lists or inspects streams.
         res.json({ streams: streams });
 
     } catch (error) {
@@ -368,45 +366,35 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     }
 });
 
-// ─── IMPROVED TEST VIDEO ENDPOINT WITH BETTER DEDUPLICATION ───
+// ─── SIMPLE TEST VIDEO ENDPOINT WITH 4-SECOND DEDUPLICATION ───
 app.get("/test-video", async (req, res) => {
-    console.log(`[TEST] Test video requested with Overseerr processing`);
-    console.log('[TEST] query:', req.query);
-
+    console.log(`[TEST] Test video requested`);
+    
     const { config, type, tmdbId, title, season, episode } = req.query;
 
-    // ✅ FIXED: IMPROVED DEDUPLICATION LOGIC
+    // ✅ SIMPLE FIX: Only trigger Overseerr if no recent request (4-second cooldown)
     if (config && type && tmdbId && title) {
         const userConfig = decodeConfig(config);
         if (userConfig) {
-            // Create a more stable dedupe key that persists across range requests
-            const requestKey = `overseerr-${userConfig.overseerrUrl}-${userConfig.overseerrApi}-${type}-${tmdbId}-${season || ''}-${episode || ''}`;
+            // Create request key
+            const requestKey = `req-${userConfig.overseerrUrl}-${userConfig.overseerrApi}-${type}-${tmdbId}-${season || ''}-${episode || ''}`;
             
-            // Check if this is the initial request (not a range request)
-            const isInitialRequest = !req.headers.range || req.headers.range.startsWith('bytes=0-');
+            const now = Date.now();
+            const lastRequest = pendingRequests.get(requestKey);
             
-            if (isInitialRequest && !pendingRequests.has(requestKey)) {
-                console.log(`[OVERSEERR] 🔄 Starting NEW background request for: "${title}"`);
+            // Only make request if no previous request OR if previous request was more than 4 seconds ago
+            if (!lastRequest || (now - lastRequest) > 4000) {
+                console.log(`[OVERSEERR] 🚀 Making request for: "${title}"`);
                 
-                // Set pending request with longer TTL
-                const timeout = setTimeout(() => {
-                    pendingRequests.delete(requestKey);
-                    console.log(`[OVERSEERR] 🕒 TTL expired for: "${title}"`);
-                }, REQUEST_TTL);
+                // Update timestamp
+                pendingRequests.set(requestKey, now);
                 
-                pendingRequests.set(requestKey, {
-                    timeout: timeout,
-                    timestamp: Date.now(),
-                    title: title
-                });
-
                 // Make the Overseerr request in background
                 (async () => {
                     try {
                         const seasonNum = season ? parseInt(season) : null;
                         const reqType = type === 'movie' ? 'movie' : (seasonNum !== null ? 'season' : 'series');
                         
-                        console.log(`[OVERSEERR] 🚀 Making API request for: "${title}"`);
                         const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, reqType, userConfig);
                         
                         if (result.success) {
@@ -416,85 +404,31 @@ app.get("/test-video", async (req, res) => {
                         }
                     } catch (err) {
                         console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
-                    } finally {
-                        // Keep the request in memory for TTL to prevent duplicates
-                        // The timeout will automatically clean it up
-                        console.log(`[OVERSEERR] 🏁 Completed processing for: "${title}"`);
                     }
                 })();
-            } else if (isInitialRequest) {
-                const existingRequest = pendingRequests.get(requestKey);
-                const age = Date.now() - existingRequest.timestamp;
-                console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Already processing (${Math.floor(age/1000)}s ago)`);
             } else {
-                console.log(`[OVERSEERR] 📦 RANGE REQUEST: "${title}" - Skipping duplicate check`);
+                const timeSince = (now - lastRequest) / 1000;
+                console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${timeSince.toFixed(1)}s ago (4s cooldown)`);
             }
-        } else {
-            console.log('[TEST] Invalid user config in query string');
         }
     }
 
-    // Proxy the wait video from the CDN and stream it to the client while preserving Range behavior.
-    const waitUrl = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
-    try {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-
-        // Forward client's Range header if present
-        const forwardHeaders = {};
-        if (req.headers.range) forwardHeaders['Range'] = req.headers.range;
-        // Some clients require a User-Agent; forward what's provided
-        if (req.headers['user-agent']) forwardHeaders['User-Agent'] = req.headers['user-agent'];
-
-        const upstreamResp = await fetch(waitUrl, { headers: forwardHeaders });
-
-        // Copy relevant headers back to the client
-        const headerNames = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control', 'last-modified'];
-        headerNames.forEach(h => {
-            const v = upstreamResp.headers.get(h);
-            if (v) res.setHeader(h, v);
-        });
-
-        // Use the exact upstream status (200 or 206)
-        res.status(upstreamResp.status);
-
-        // Pipe the upstream response body to the client
-        const upstreamBody = upstreamResp.body;
-        if (upstreamBody && typeof upstreamBody.pipe === 'function') {
-            upstreamBody.pipe(res);
-        } else {
-            // Fallback: read as buffer then send
-            const buffer = await upstreamResp.buffer();
-            res.send(buffer);
-        }
-    } catch (err) {
-        console.error('[TEST] Proxy error:', err.message);
-        // If proxy fails, fallback to a redirect so the client still receives a playable location
-        try {
-            res.status(302).redirect(waitUrl);
-        } catch (redirErr) {
-            console.error('[TEST] Redirect fallback failed:', redirErr.message);
-            res.status(502).send('Bad Gateway');
-        }
-    }
+    // Redirect to your original wait.mp4 from jsDelivr
+    const waitUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
+    res.redirect(waitUrl);
 });
 
-// ─── Health Check with Pending Requests Info ───
+// ─── Health Check ──────────────────
 app.get("/health", (req, res) => {
     const pendingCount = pendingRequests.size;
-    const pendingList = Array.from(pendingRequests.entries()).map(([key, value]) => ({
-        key: key.substring(0, 50) + '...',
-        title: value.title,
-        age: Math.floor((Date.now() - value.timestamp) / 1000) + 's'
-    }));
-
+    
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
         server: 'Ready',
-        video: 'Using longer sample video (Big Buck Bunny)',
+        video: 'Using your original wait.mp4 from CDN',
         pending_requests: pendingCount,
-        pending_list: pendingList,
-        behavior: 'Improved deduplication - prevents multiple requests ✅'
+        behavior: '4-second cooldown prevents multiple requests ✅'
     });
 });
 
@@ -502,11 +436,10 @@ app.get("/health", (req, res) => {
 app.get("/cleanup", (req, res) => {
     const beforeCount = pendingRequests.size;
     
-    // Clean up expired requests
-    const now = Date.now();
-    for (const [key, value] of pendingRequests.entries()) {
-        if (now - value.timestamp > REQUEST_TTL) {
-            clearTimeout(value.timeout);
+    // Clean up old requests (older than 1 hour)
+    const oneHourAgo = Date.now() - (60 * 60 * 1000);
+    for (const [key, timestamp] of pendingRequests.entries()) {
+        if (timestamp < oneHourAgo) {
             pendingRequests.delete(key);
         }
     }
@@ -517,7 +450,7 @@ app.get("/cleanup", (req, res) => {
     res.json({
         cleaned: cleaned,
         remaining: afterCount,
-        message: `Cleaned ${cleaned} expired requests, ${afterCount} remaining`
+        message: `Cleaned ${cleaned} old requests, ${afterCount} remaining`
     });
 });
 
@@ -635,7 +568,7 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ DEDUPLICATION FIXED:</strong> Now prevents multiple requests for the same movie/show!
+                <strong>✅ 4-SECOND COOLDOWN:</strong> Using your original wait.mp4 with 4-second cooldown to prevent duplicate requests!
             </div>
 
             <form id="configForm">
@@ -851,6 +784,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
     console.log(`🧹 Cleanup: ${SERVER_URL}/cleanup`);
-    console.log(`🎯 Using longer sample video (Big Buck Bunny)`);
-    console.log(`🚀 DEDUPLICATION FIXED: Prevents multiple requests for same content`);
+    console.log(`🎯 Using YOUR original wait.mp4 from jsDelivr`);
+    console.log(`🚀 4-SECOND COOLDOWN: Prevents duplicate requests when clicking through streams quickly`);
 });
