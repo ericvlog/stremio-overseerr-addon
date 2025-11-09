@@ -177,26 +177,20 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null, 
     const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
 
     let streamTitle;
-    // Make the stream title explicit so users can tell what will be requested
     if (type === 'movie') {
-        streamTitle = `Request "${title}" — (Movie Request)`;
+        streamTitle = `Request "${title}"`;
     } else if (season && episode) {
         if (requestType === 'season') {
-            streamTitle = `Request Season ${season} of "${title}" — (Season Request)`;
+            streamTitle = `Request Season ${season} of "${title}"`;
         } else if (requestType === 'series') {
-            streamTitle = `Request Entire Series "${title}" — (Full Series Request)`;
+            streamTitle = `Request Entire Series "${title}"`;
         } else {
-            streamTitle = `Request S${season}E${episode} of "${title}" — (Episode Request)`;
+            streamTitle = `Request S${season}E${episode} of "${title}"`;
         }
     } else if (season) {
-        streamTitle = `Request Season ${season} of "${title}" — (Season Request)`;
+        streamTitle = `Request Season ${season} of "${title}"`;
     } else {
-        // No season/episode specified: prefer explicit full-series label when requested
-        if (requestType === 'series') {
-            streamTitle = `Request Entire Series "${title}" — (Full Series Request)`;
-        } else {
-            streamTitle = `Request "${title}"`;
-        }
+        streamTitle = `Request "${title}"`;
     }
 
     const params = new URLSearchParams({
@@ -430,21 +424,7 @@ app.get("/proxy-wait", async (req, res) => {
     const { config, type, tmdbId, title, season, episode, requestType } = req.query;
 
     // ✅ FIXED: Only trigger Overseerr on INITIAL request (not range requests)
-    // By default consider it initial when no Range header or it starts at 0.
-    const rangeHeader = req.headers.range;
-    let isInitialRequest = !rangeHeader || (typeof rangeHeader === 'string' && rangeHeader.startsWith('bytes=0-'));
-
-    // Some clients (Stremio variants) may send a Range header that prevents our
-    // trigger even on the first click for movie streams. To avoid missing movie
-    // requests, treat movie-type streams as initial requests regardless of the
-    // Range header. The pendingRequests cooldown still prevents duplicates.
-    try {
-        if (!isInitialRequest && req.query && req.query.type === 'movie') {
-            isInitialRequest = true;
-        }
-    } catch (e) {
-        // If anything odd happens reading the query, fall back to existing logic.
-    }
+    const isInitialRequest = !req.headers.range || req.headers.range.startsWith('bytes=0-');
     
     if (isInitialRequest && config && type && tmdbId && title) {
         const userConfig = decodeConfig(config);
@@ -456,23 +436,19 @@ app.get("/proxy-wait", async (req, res) => {
             const now = Date.now();
             const lastRequest = pendingRequests.get(requestKey);
             const FIVE_MINUTES = 5 * 60 * 1000;
-
-            // Helper: sleep ms
-            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-            // If there's no previous entry, mark as in-progress and proceed.
-            if (!lastRequest) {
+            
+            if (!lastRequest || (now - lastRequest) > FIVE_MINUTES) {
                 console.log(`[OVERSEERR] 🚀 Making request for: "${title}" (Type: ${requestType || 'auto'})`);
-
-                // Mark as in-progress to de-duplicate near-simultaneous requests
-                pendingRequests.set(requestKey, { status: 'in-progress', ts: now });
-
+                
+                // Store the request timestamp
+                pendingRequests.set(requestKey, now);
+                
                 // Make the Overseerr request in background
                 (async () => {
                     try {
                         const seasonNum = season ? parseInt(season) : null;
-
-                        // ✅ Determine request type for series
+                        
+                        // ✅ FIXED: Determine request type for series
                         let finalRequestType;
                         if (type === 'movie') {
                             finalRequestType = 'movie';
@@ -482,15 +458,15 @@ app.get("/proxy-wait", async (req, res) => {
                             } else if (requestType === 'season' && seasonNum !== null) {
                                 finalRequestType = 'season'; // Specific season
                             } else if (seasonNum !== null) {
-                                finalRequestType = 'season';
+                                finalRequestType = 'season'; // Default to season if season specified
                             } else {
-                                finalRequestType = 'series';
+                                finalRequestType = 'series'; // Default to series if no season
                             }
                         }
-
+                        
                         console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}, Season: ${seasonNum}`);
                         const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, finalRequestType, userConfig);
-
+                        
                         if (result.success) {
                             console.log(`[OVERSEERR] ✅ SUCCESS: "${title}" - Request ID: ${result.requestId}`);
                         } else {
@@ -498,63 +474,11 @@ app.get("/proxy-wait", async (req, res) => {
                         }
                     } catch (err) {
                         console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
-                    } finally {
-                        // Mark as completed with timestamp so cooldown applies
-                        pendingRequests.set(requestKey, Date.now());
                     }
                 })();
-
-            } else if (typeof lastRequest === 'number') {
-                // There is a completed timestamp recorded
-                if ((now - lastRequest) > FIVE_MINUTES) {
-                    // older than cooldown, allow a new request
-                    console.log(`[OVERSEERR] 🚀 Cooldown expired, making new request for: "${title}"`);
-
-                    pendingRequests.set(requestKey, { status: 'in-progress', ts: now });
-
-                    (async () => {
-                        try {
-                            const seasonNum = season ? parseInt(season) : null;
-                            let finalRequestType = (type === 'movie') ? 'movie' : (requestType === 'series' ? 'series' : (requestType === 'season' && seasonNum !== null) ? 'season' : (seasonNum !== null ? 'season' : 'series'));
-                            console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}, Season: ${seasonNum}`);
-                            const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, finalRequestType, userConfig);
-                            if (result.success) {
-                                console.log(`[OVERSEERR] ✅ SUCCESS: "${title}" - Request ID: ${result.requestId}`);
-                            } else {
-                                console.error(`[OVERSEERR] ❌ FAILED: "${title}" - ${result.error}`);
-                            }
-                        } catch (err) {
-                            console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
-                        } finally {
-                            pendingRequests.set(requestKey, Date.now());
-                        }
-                    })();
-                } else {
-                    const timeSince = (now - lastRequest) / 1000;
-                    console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${Math.floor(timeSince)}s ago`);
-                }
-
-            } else if (lastRequest && lastRequest.status === 'in-progress') {
-                // A request is currently in progress for this key. Wait a short time for it to finish
-                console.log(`[OVERSEERR] ⏳ Request for "${title}" already in-progress — waiting briefly before deciding`);
-                const WAIT_MS = 1500; // wait up to 1.5s
-                const INTERVAL = 150; // poll interval
-                let waited = 0;
-                while (waited < WAIT_MS) {
-                    await sleep(INTERVAL);
-                    waited += INTERVAL;
-                    const updated = pendingRequests.get(requestKey);
-                    if (typeof updated === 'number') {
-                        const timeSince = (Date.now() - updated) / 1000;
-                        console.log(`[OVERSEERR] ⏩ After wait: skipping because request completed ${Math.floor(timeSince)}s ago`);
-                        break;
-                    }
-                }
-                // If after waiting it's still in-progress, we skip to avoid duplicates
-                const finalState = pendingRequests.get(requestKey);
-                if (finalState && finalState.status === 'in-progress') {
-                    console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - still in-progress after wait`);
-                }
+            } else {
+                const timeSince = (now - lastRequest) / 1000;
+                console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${Math.floor(timeSince)}s ago`);
             }
         }
     } else if (!isInitialRequest) {
