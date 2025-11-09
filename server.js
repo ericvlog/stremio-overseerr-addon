@@ -430,7 +430,21 @@ app.get("/proxy-wait", async (req, res) => {
     const { config, type, tmdbId, title, season, episode, requestType } = req.query;
 
     // ✅ FIXED: Only trigger Overseerr on INITIAL request (not range requests)
-    const isInitialRequest = !req.headers.range || req.headers.range.startsWith('bytes=0-');
+    // By default consider it initial when no Range header or it starts at 0.
+    const rangeHeader = req.headers.range;
+    let isInitialRequest = !rangeHeader || (typeof rangeHeader === 'string' && rangeHeader.startsWith('bytes=0-'));
+
+    // Some clients (Stremio variants) may send a Range header that prevents our
+    // trigger even on the first click for movie streams. To avoid missing movie
+    // requests, treat movie-type streams as initial requests regardless of the
+    // Range header. The pendingRequests cooldown still prevents duplicates.
+    try {
+        if (!isInitialRequest && req.query && req.query.type === 'movie') {
+            isInitialRequest = true;
+        }
+    } catch (e) {
+        // If anything odd happens reading the query, fall back to existing logic.
+    }
     
     if (isInitialRequest && config && type && tmdbId && title) {
         const userConfig = decodeConfig(config);
