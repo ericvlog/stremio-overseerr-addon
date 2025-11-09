@@ -14,7 +14,7 @@ A Stremio addon that lets you request movies and TV shows directly through Overs
 
 ### **For Public Overseerr Instances**
 
-1. **Visit the configuration page**: [Your Vercel URL]
+1. **Visit the configuration page**: [https://stremio-overseerr-addon.vercel.app/]
 2. **Enter your details**:
    - Your TMDB API Key (get from [TMDB](https://www.themoviedb.org/settings/api))
    - Your Overseerr URL (e.g., `https://overseerr.example.com`)
