@@ -6,7 +6,12 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 7000;
-const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`;
+// ✅ ADD THIS SERVER_URL CONFIGURATION (safe for both Vercel and Render)
+const SERVER_URL = process.env.VERCEL_URL ? 
+  `https://${process.env.VERCEL_URL}` : 
+  (process.env.RENDER_EXTERNAL_URL ? 
+    `https://${process.env.RENDER_EXTERNAL_URL}` : 
+    `http://localhost:${PORT}`);
 
 // Store pending requests to avoid duplicates
 const pendingRequests = new Map();
@@ -950,6 +955,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🧪 Configuration testing: ${SERVER_URL}/api/test-configuration`);
     console.log(`❤️  Health: ${SERVER_URL}/health`);
     console.log(`🧹 Cleanup: ${SERVER_URL}/cleanup`);
+    console.log(`🌐 Environment: ${process.env.VERCEL_URL ? 'Vercel' : (process.env.RENDER_EXTERNAL_URL ? 'Render' : 'Local')}`);
     console.log(`🎯 Using YOUR wait.mp4 with direct proxy`);
     console.log(`🚀 FIXED: Entire series requests now working!`);
     console.log(`📺 SERIES: For episodes, shows "Request Season X" AND "Request Entire Series"`);
