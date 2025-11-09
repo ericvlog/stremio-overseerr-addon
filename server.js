@@ -423,10 +423,8 @@ app.get("/proxy-wait", async (req, res) => {
 
     const { config, type, tmdbId, title, season, episode, requestType } = req.query;
 
-    // ✅ FIXED: Only trigger Overseerr on INITIAL request (not range requests)
-    const isInitialRequest = !req.headers.range || req.headers.range.startsWith('bytes=0-');
-    
-    if (isInitialRequest && config && type && tmdbId && title) {
+    // ✅ FIXED: Remove range request check and use simpler logic
+    if (config && type && tmdbId && title) {
         const userConfig = decodeConfig(config);
         if (userConfig) {
             // Create request key that includes the request type
@@ -481,8 +479,6 @@ app.get("/proxy-wait", async (req, res) => {
                 console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${Math.floor(timeSince)}s ago`);
             }
         }
-    } else if (!isInitialRequest) {
-        console.log(`[PROXY] Range request - skipping Overseerr trigger`);
     }
 
     // ✅ Proxy your wait.mp4 directly
@@ -496,6 +492,7 @@ app.get("/proxy-wait", async (req, res) => {
         const headers = {};
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
+            console.log(`[PROXY] Handling range request: ${req.headers.range}`);
         }
 
         const response = await fetch(waitUrl, { headers });
