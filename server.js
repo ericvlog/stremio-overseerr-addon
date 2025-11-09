@@ -456,19 +456,23 @@ app.get("/proxy-wait", async (req, res) => {
             const now = Date.now();
             const lastRequest = pendingRequests.get(requestKey);
             const FIVE_MINUTES = 5 * 60 * 1000;
-            
-            if (!lastRequest || (now - lastRequest) > FIVE_MINUTES) {
+
+            // Helper: sleep ms
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+            // If there's no previous entry, mark as in-progress and proceed.
+            if (!lastRequest) {
                 console.log(`[OVERSEERR] 🚀 Making request for: "${title}" (Type: ${requestType || 'auto'})`);
-                
-                // Store the request timestamp
-                pendingRequests.set(requestKey, now);
-                
+
+                // Mark as in-progress to de-duplicate near-simultaneous requests
+                pendingRequests.set(requestKey, { status: 'in-progress', ts: now });
+
                 // Make the Overseerr request in background
                 (async () => {
                     try {
                         const seasonNum = season ? parseInt(season) : null;
-                        
-                        // ✅ FIXED: Determine request type for series
+
+                        // ✅ Determine request type for series
                         let finalRequestType;
                         if (type === 'movie') {
                             finalRequestType = 'movie';
@@ -478,15 +482,15 @@ app.get("/proxy-wait", async (req, res) => {
                             } else if (requestType === 'season' && seasonNum !== null) {
                                 finalRequestType = 'season'; // Specific season
                             } else if (seasonNum !== null) {
-                                finalRequestType = 'season'; // Default to season if season specified
+                                finalRequestType = 'season';
                             } else {
-                                finalRequestType = 'series'; // Default to series if no season
+                                finalRequestType = 'series';
                             }
                         }
-                        
+
                         console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}, Season: ${seasonNum}`);
                         const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, finalRequestType, userConfig);
-                        
+
                         if (result.success) {
                             console.log(`[OVERSEERR] ✅ SUCCESS: "${title}" - Request ID: ${result.requestId}`);
                         } else {
@@ -494,11 +498,63 @@ app.get("/proxy-wait", async (req, res) => {
                         }
                     } catch (err) {
                         console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
+                    } finally {
+                        // Mark as completed with timestamp so cooldown applies
+                        pendingRequests.set(requestKey, Date.now());
                     }
                 })();
-            } else {
-                const timeSince = (now - lastRequest) / 1000;
-                console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${Math.floor(timeSince)}s ago`);
+
+            } else if (typeof lastRequest === 'number') {
+                // There is a completed timestamp recorded
+                if ((now - lastRequest) > FIVE_MINUTES) {
+                    // older than cooldown, allow a new request
+                    console.log(`[OVERSEERR] 🚀 Cooldown expired, making new request for: "${title}"`);
+
+                    pendingRequests.set(requestKey, { status: 'in-progress', ts: now });
+
+                    (async () => {
+                        try {
+                            const seasonNum = season ? parseInt(season) : null;
+                            let finalRequestType = (type === 'movie') ? 'movie' : (requestType === 'series' ? 'series' : (requestType === 'season' && seasonNum !== null) ? 'season' : (seasonNum !== null ? 'season' : 'series'));
+                            console.log(`[OVERSEERR] 📡 Calling API for: "${title}" - Request Type: ${finalRequestType}, Season: ${seasonNum}`);
+                            const result = await makeOverseerrRequest(tmdbId, type, title, seasonNum, finalRequestType, userConfig);
+                            if (result.success) {
+                                console.log(`[OVERSEERR] ✅ SUCCESS: "${title}" - Request ID: ${result.requestId}`);
+                            } else {
+                                console.error(`[OVERSEERR] ❌ FAILED: "${title}" - ${result.error}`);
+                            }
+                        } catch (err) {
+                            console.error(`[OVERSEERR] ❌ ERROR: "${title}" - ${err.message}`);
+                        } finally {
+                            pendingRequests.set(requestKey, Date.now());
+                        }
+                    })();
+                } else {
+                    const timeSince = (now - lastRequest) / 1000;
+                    console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${Math.floor(timeSince)}s ago`);
+                }
+
+            } else if (lastRequest && lastRequest.status === 'in-progress') {
+                // A request is currently in progress for this key. Wait a short time for it to finish
+                console.log(`[OVERSEERR] ⏳ Request for "${title}" already in-progress — waiting briefly before deciding`);
+                const WAIT_MS = 1500; // wait up to 1.5s
+                const INTERVAL = 150; // poll interval
+                let waited = 0;
+                while (waited < WAIT_MS) {
+                    await sleep(INTERVAL);
+                    waited += INTERVAL;
+                    const updated = pendingRequests.get(requestKey);
+                    if (typeof updated === 'number') {
+                        const timeSince = (Date.now() - updated) / 1000;
+                        console.log(`[OVERSEERR] ⏩ After wait: skipping because request completed ${Math.floor(timeSince)}s ago`);
+                        break;
+                    }
+                }
+                // If after waiting it's still in-progress, we skip to avoid duplicates
+                const finalState = pendingRequests.get(requestKey);
+                if (finalState && finalState.status === 'in-progress') {
+                    console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - still in-progress after wait`);
+                }
             }
         }
     } else if (!isInitialRequest) {
