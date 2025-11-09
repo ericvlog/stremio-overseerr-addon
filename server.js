@@ -635,7 +635,7 @@ app.options('*', (req, res) => {
     res.sendStatus(200);
 });
 
-// ─── COMPLETE CONFIGURATION PAGE WITH TESTING ────────────────────
+// ─── UPDATED CONFIGURATION PAGE ────────────────────
 app.get("/", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -663,7 +663,7 @@ app.get("/", (req, res) => {
             .help-text { color: #888; font-size: 12px; margin-top: 5px; }
             .success { background: #155724; color: #d4edda; padding: 12px; border-radius: 6px; margin: 15px 0; }
             .error { background: #721c24; color: #f8d7da; padding: 12px; border-radius: 6px; margin: 15px 0; }
-            .warning { background: #856404; color: #fff3cd; padding: 12px; border-radius: 6px; margin: 15px 0; }
+            .info-box { background: #1e3a5f; color: #dbeafe; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #3b82f6; }
             .addon-url { background: #2a2a2a; padding: 15px; border-radius: 6px; margin: 15px 0; font-family: monospace; word-break: break-all; }
             .links { margin-top: 25px; padding-top: 20px; border-top: 1px solid #333; }
             .links a { color: #8ef; text-decoration: none; margin-right: 15px; display: inline-block; margin-bottom: 8px; }
@@ -673,11 +673,6 @@ app.get("/", (req, res) => {
             .test-success { background: #155724; color: #d4edda; }
             .test-error { background: #721c24; color: #f8d7da; }
             .loading { color: #17a2b8; }
-            .video-tests { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
-            .video-test-item { background: #2a2a2a; padding: 15px; border-radius: 6px; text-align: center; }
-            @media (max-width: 600px) {
-                .video-tests { grid-template-columns: 1fr; }
-            }
         </style>
     </head>
     <body>
@@ -686,89 +681,86 @@ app.get("/", (req, res) => {
             <p>Configure your personal addon instance below. Your settings are encoded in the addon URL - no data is stored on the server.</p>
 
             <div class="success">
-                <strong>✅ FIXED: Entire series requests now working!</strong>
+                <strong>✅ COMPLETE: Movies, seasons, and entire series requests all working!</strong>
+            </div>
+
+            <div class="info-box">
+                <h3>🔐 Your Data Stays With You</h3>
+                <p><strong>No data is stored on our server</strong> - your API keys and URLs are encoded directly into your personal addon URL.</p>
+                <p><strong>Works with any Overseerr instance</strong> - public domains or local IPs, it's your choice!</p>
             </div>
 
             <form id="configForm">
-                <h2>🔑 API Configuration</h2>
+                <h2>🔑 Your API Configuration</h2>
 
                 <div class="form-group">
-                    <label for="tmdbKey">TMDB API Key *</label>
-                    <input type="text" id="tmdbKey" name="tmdbKey" required placeholder="Enter your TMDB API key">
+                    <label for="tmdbKey">Your TMDB API Key *</label>
+                    <input type="text" id="tmdbKey" name="tmdbKey" required placeholder="Enter your personal TMDB API key">
                     <div class="help-text">Get your free API key from: https://www.themoviedb.org/settings/api</div>
                 </div>
 
                 <div class="form-group">
-                    <label for="overseerrUrl">Overseerr URL *</label>
+                    <label for="overseerrUrl">Your Overseerr URL *</label>
                     <input type="text" id="overseerrUrl" name="overseerrUrl" required placeholder="https://overseerr.example.com or http://192.168.1.100:5055">
-                    <div class="help-text">Your Overseerr instance URL (supports both domains and IP addresses)</div>
+                    <div class="help-text">
+                        Your personal Overseerr instance URL<br>
+                        • <strong>Public domain</strong>: https://overseerr.yourdomain.com<br>
+                        • <strong>Local network</strong>: http://192.168.1.100:5055<br>
+                        • <strong>Include http:// or https://</strong>
+                    </div>
                 </div>
 
                 <div class="form-group">
-                    <label for="overseerrApi">Overseerr API Key *</label>
-                    <input type="text" id="overseerrApi" name="overseerrApi" required placeholder="Enter your Overseerr API key">
+                    <label for="overseerrApi">Your Overseerr API Key *</label>
+                    <input type="text" id="overseerrApi" name="overseerrApi" required placeholder="Enter your personal Overseerr API key">
                     <div class="help-text">Get from Overseerr: Settings → API Keys → Generate New API Key</div>
                 </div>
 
-                <button type="button" class="btn" onclick="generateAddon()">Generate Addon URL</button>
-                <button type="button" class="btn btn-test" onclick="testConfiguration()">Test Configuration</button>
+                <button type="button" class="btn" onclick="generateAddon()">Generate My Personal Addon URL</button>
+                <button type="button" class="btn btn-test" onclick="testConfiguration()">Test My Configuration</button>
             </form>
 
             <div id="result" style="display: none;">
-                <h2>📦 Your Addon URL</h2>
+                <h2>📦 Your Personal Addon URL</h2>
                 <div class="addon-url" id="addonUrl"></div>
-                <p>Copy this URL and install it in Stremio:</p>
-                <ol>
-                    <li>Open Stremio</li>
-                    <li>Click the puzzle piece icon (Addons)</li>
-                    <li>Click "Community Addons"</li>
-                    <li>Paste the URL above and click "Install"</li>
-                </ol>
+                
+                <div class="info-box">
+                    <h3>🚀 Ready to Install!</h3>
+                    <p>This URL contains <strong>your personal configuration</strong> and can be installed in Stremio:</p>
+                    <ol>
+                        <li>Open Stremio</li>
+                        <li>Click the puzzle piece icon (Addons)</li>
+                        <li>Click "Community Addons"</li>
+                        <li>Paste this URL and click "Install"</li>
+                    </ol>
+                </div>
+
                 <button class="btn" onclick="installInStremio()">Install in Stremio</button>
-                <button class="btn btn-test" onclick="copyToClipboard()">Copy URL</button>
+                <button class="btn btn-test" onclick="copyToClipboard()">Copy My Addon URL</button>
             </div>
 
             <div class="test-section">
                 <h3>🧪 Test Your Configuration</h3>
                 <p>Test if your API keys and URLs are working correctly:</p>
-                <button class="btn btn-test" onclick="testConfiguration()">Test Configuration</button>
+                <button class="btn btn-test" onclick="testConfiguration()">Test My Configuration</button>
                 <div id="testResults" style="margin-top: 10px;"></div>
             </div>
 
-            <h3>🎬 Video Playback Tests</h3>
-            <p>Test if the video playback works in your browser (required for Stremio):</p>
-
-            <div class="video-tests">
-                <div class="video-test-item">
-                    <h4>Direct Video Test</h4>
-                    <p>Test basic video streaming</p>
-                    <a href="/proxy-wait" target="_blank" class="btn btn-test">Test Video Playback</a>
-                </div>
-                <div class="video-test-item">
-                    <h4>Movie Request Test</h4>
-                    <p>Test movie request flow</p>
-                    <a href="/stream/movie/tt0133093.json" target="_blank" class="btn btn-test">Test Movie Stream</a>
-                </div>
-                <div class="video-test-item">
-                    <h4>TV Show Test</h4>
-                    <p>Test TV show request flow</p>
-                    <a href="/stream/series/tt0944947:1:1.json" target="_blank" class="btn btn-test">Test TV Stream</a>
-                </div>
-                <div class="video-test-item">
-                    <h4>Health Check</h4>
-                    <p>Check server status</p>
-                    <a href="/health" target="_blank" class="btn btn-test">Check Health</a>
-                </div>
+            <div class="info-box">
+                <h3>🔧 How It Works</h3>
+                <p><strong>For Each User:</strong></p>
+                <ul>
+                    <li>You enter <strong>your own</strong> TMDB API key</li>
+                    <li>You enter <strong>your own</strong> Overseerr URL (public or local)</li>
+                    <li>You enter <strong>your own</strong> Overseerr API key</li>
+                    <li>We generate a <strong>personal addon URL</strong> with your config encoded</li>
+                    <li>Stremio uses your personal URL to make requests through our server</li>
+                </ul>
+                <p><strong>Your data is safe</strong> - we never store your API keys or URLs.</p>
             </div>
 
             <div class="links">
                 <h3>🔗 Quick Links</h3>
-                <a href="/health">❤️ Health Check</a>
-                <a href="/cleanup">🧹 Cleanup Pending Requests</a>
-                <a href="/proxy-wait">🎬 Test Video Playback</a>
-                <a href="/stream/movie/tt0133093.json">🎬 Test Movie Stream (Matrix)</a>
-                <a href="/stream/series/tt0944947:1:1.json">📺 Test TV Episode Stream (GoT S1E1)</a>
-                <a href="/manifest.json">📋 Manifest File</a>
                 <a href="https://github.com/ericvlog/stremio-overseerr-addon" target="_blank">📚 GitHub Repository</a>
             </div>
         </div>
@@ -789,7 +781,13 @@ app.get("/", (req, res) => {
                     return;
                 }
 
-                document.getElementById('testResults').innerHTML = '<div class="loading">Testing configuration... (this may take a few seconds)</div>';
+                // Validate URL format
+                if (!config.overseerrUrl.startsWith('http://') && !config.overseerrUrl.startsWith('https://')) {
+                    document.getElementById('testResults').innerHTML = '<div class="error">Overseerr URL must start with http:// or https://</div>';
+                    return;
+                }
+
+                document.getElementById('testResults').innerHTML = '<div class="loading">Testing your configuration... (this may take a few seconds)</div>';
 
                 const testButton = document.querySelector('.test-section .btn');
                 testButton.disabled = true;
@@ -825,7 +823,7 @@ app.get("/", (req, res) => {
                     document.getElementById('testResults').innerHTML = '<div class="error">❌ Test failed: ' + error.message + '</div>';
                 } finally {
                     testButton.disabled = false;
-                    testButton.textContent = 'Test Configuration';
+                    testButton.textContent = 'Test My Configuration';
                 }
             }
 
@@ -842,6 +840,12 @@ app.get("/", (req, res) => {
                 // Basic validation
                 if (!config.tmdbKey || !config.overseerrUrl || !config.overseerrApi) {
                     alert('Please fill in all required fields');
+                    return;
+                }
+
+                // Validate URL format
+                if (!config.overseerrUrl.startsWith('http://') && !config.overseerrUrl.startsWith('https://')) {
+                    alert('Overseerr URL must start with http:// or https://');
                     return;
                 }
 
@@ -871,7 +875,7 @@ app.get("/", (req, res) => {
             function copyToClipboard() {
                 if (window.generatedAddonUrl) {
                     navigator.clipboard.writeText(window.generatedAddonUrl).then(function() {
-                        alert('Addon URL copied to clipboard!');
+                        alert('Your personal addon URL copied to clipboard!');
                     }, function(err) {
                         console.error('Could not copy text: ', err);
                     });
