@@ -177,20 +177,26 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null, 
     const waitVideoUrl = "https://cdn.jsdelivr.net/gh/ericvlog/stremio-overseerr-addon@main/public/wait.mp4";
 
     let streamTitle;
+    // Make the stream title explicit so users can tell what will be requested
     if (type === 'movie') {
-        streamTitle = `🎬 Request Movie: "${title}"`;
+        streamTitle = `Request "${title}" — (Movie Request)`;
     } else if (season && episode) {
         if (requestType === 'season') {
-            streamTitle = `📺 Request Entire Season ${season} of "${title}"`;
+            streamTitle = `Request Season ${season} of "${title}" — (Season Request)`;
         } else if (requestType === 'series') {
-            streamTitle = `🏠 Request Complete Series: "${title}" (All Seasons)`;
+            streamTitle = `Request Entire Series "${title}" — (Full Series Request)`;
         } else {
-            streamTitle = `📺 Request S${season}E${episode} of "${title}"`;
+            streamTitle = `Request S${season}E${episode} of "${title}" — (Episode Request)`;
         }
     } else if (season) {
-        streamTitle = `📺 Request Entire Season ${season} of "${title}"`;
+        streamTitle = `Request Season ${season} of "${title}" — (Season Request)`;
     } else {
-        streamTitle = `🏠 Request Complete Series: "${title}" (All Seasons)`;
+        // No season/episode specified: prefer explicit full-series label when requested
+        if (requestType === 'series') {
+            streamTitle = `Request Entire Series "${title}" — (Full Series Request)`;
+        } else {
+            streamTitle = `Request "${title}"`;
+        }
     }
 
     const params = new URLSearchParams({
@@ -423,8 +429,10 @@ app.get("/proxy-wait", async (req, res) => {
 
     const { config, type, tmdbId, title, season, episode, requestType } = req.query;
 
-    // ✅ FIXED: Remove range request check and use simpler logic
-    if (config && type && tmdbId && title) {
+    // ✅ FIXED: Only trigger Overseerr on INITIAL request (not range requests)
+    const isInitialRequest = !req.headers.range || req.headers.range.startsWith('bytes=0-');
+    
+    if (isInitialRequest && config && type && tmdbId && title) {
         const userConfig = decodeConfig(config);
         if (userConfig) {
             // Create request key that includes the request type
@@ -479,6 +487,8 @@ app.get("/proxy-wait", async (req, res) => {
                 console.log(`[OVERSEERR] ⏩ SKIPPING: "${title}" - Request made ${Math.floor(timeSince)}s ago`);
             }
         }
+    } else if (!isInitialRequest) {
+        console.log(`[PROXY] Range request - skipping Overseerr trigger`);
     }
 
     // ✅ Proxy your wait.mp4 directly
@@ -492,7 +502,6 @@ app.get("/proxy-wait", async (req, res) => {
         const headers = {};
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
-            console.log(`[PROXY] Handling range request: ${req.headers.range}`);
         }
 
         const response = await fetch(waitUrl, { headers });
