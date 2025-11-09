@@ -722,7 +722,7 @@ app.get("/", (req, res) => {
             <div class="info-box">
                 <h3>🔐 Your Data Stays With You</h3>
                 <p><strong>No data is stored on our server</strong> - your API keys and URLs are encoded directly into your personal addon URL.</p>
-                <p><strong>Works with any Overseerr instance</strong> - public domains or local IPs, it's your choice!</p>
+                <p><strong>Works with any Overseerr instance</strong> - <strong>public domains work from remote hosting</strong>. <em>Local IPs/hostnames (e.g. <code>192.168.x.x</code>, <code>localhost</code>, <code>.local</code>) will only work if you self-host this addon on the same network as your Overseerr instance.</em></p>
             </div>
 
             <form id="configForm">
@@ -742,6 +742,11 @@ app.get("/", (req, res) => {
                         • <strong>Public domain</strong>: https://overseerr.yourdomain.com<br>
                         • <strong>Local network</strong>: http://192.168.1.100:5055<br>
                         • <strong>Include http:// or https://</strong>
+                    </div>
+
+                    <!-- Static banner: clarify that local IPs require self-hosting -->
+                    <div class="test-warning" style="margin-top:10px; padding:10px; border-radius:6px;">
+                        <strong>⚠️ Note:</strong> Local IPs/hostnames (e.g. <code>192.168.x.x</code>, <code>localhost</code>, <code>.local</code>) will only work if you self-host this addon on the same network as your Overseerr instance.
                     </div>
                 </div>
 
