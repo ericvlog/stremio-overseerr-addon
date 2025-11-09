@@ -11,8 +11,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=7000
-    env_file:
-      - .env
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7000/health"]
       interval: 30s
