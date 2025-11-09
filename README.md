@@ -29,17 +29,22 @@ If your Overseerr is on a local IP (`192.168.x.x`), self-host the addon:
 ```bash
 # Quick Docker deployment
 docker run -d -p 3000:3000 plsharevme/stremio-overseerr-addon:latest
-Then visit http://your-local-ip:3000 and follow the configuration steps above.
+```
 
-🐳 Docker Deployment
-Simple Docker Run
-bash
+Then visit `http://your-local-ip:3000` and follow the configuration steps above.
+
+## 🐳 Docker Deployment
+
+### **Simple Docker Run**
+```bash
 docker run -d \
   --name stremio-overseerr-addon \
   -p 3000:3000 \
   plsharevme/stremio-overseerr-addon:latest
-Docker Compose
-yaml
+```
+
+### **Docker Compose**
+```yaml
 version: '3.8'
 services:
   stremio-overseerr-addon:
@@ -48,115 +53,110 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+```
+
 Then run:
-
-bash
+```bash
 docker-compose up -d
-Access Your Instance
+```
+
+### **Access Your Instance**
 After deployment, access the configuration page at:
-
-text
+```
 http://your-server-ip:3000
-🎯 How It Works in Stremio
-For Movies
-Click the "🎬 Request Movie: 'Movie Title'" stream
+```
 
-A confirmation video plays while your request is sent to Overseerr
+## 🎯 How It Works in Stremio
 
-For TV Episodes
+### **For Movies**
+- Click the **"🎬 Request Movie: 'Movie Title'"** stream
+- A confirmation video plays while your request is sent to Overseerr
+
+### **For TV Episodes**
 You get TWO clear options:
+- **📺 Request Entire Season X** - Request just this season
+- **🏠 Request Complete Series (All Seasons)** - Request the entire series
 
-📺 Request Entire Season X - Request just this season
+### **Request Behavior**
+- ✅ **5-minute cooldown** per item to prevent duplicates
+- ✅ **Background processing** - requests happen while video plays
+- ✅ **Overseerr integration** - appears in your Overseerr request queue
 
-🏠 Request Complete Series (All Seasons) - Request the entire series
+## 🔧 Configuration
 
-Request Behavior
-✅ 5-minute cooldown per item to prevent duplicates
+### **Required Information**
+1. **TMDB API Key**: Free from [TMDB Settings](https://www.themoviedb.org/settings/api)
+2. **Overseerr URL**: Your instance URL (public domain or local IP)
+3. **Overseerr API Key**: Generate in Overseerr: Settings → API Keys
 
-✅ Background processing - requests happen while video plays
+### **URL Examples**
+- **Public**: `https://overseerr.example.com`
+- **Local**: `http://192.168.1.100:5055`
+- **Local with domain**: `https://overseerr.local`
 
-✅ Overseerr integration - appears in your Overseerr request queue
+## 🏗️ Architecture
 
-🔧 Configuration
-Required Information
-TMDB API Key: Free from TMDB Settings
-
-Overseerr URL: Your instance URL (public domain or local IP)
-
-Overseerr API Key: Generate in Overseerr: Settings → API Keys
-
-URL Examples
-Public: https://overseerr.example.com
-
-Local: http://192.168.1.100:5055
-
-Local with domain: https://overseerr.local
-
-🏗️ Architecture
-How It Works
-text
+### **How It Works**
+```
 Stremio → Your Personal Addon URL → Overseerr Addon Server → Your Overseerr Instance
-Important Notes
-Public Overseerr: Use the Vercel-hosted version
+```
 
-Local Overseerr: Must self-host the addon on the same network
+### **Important Notes**
+- **Public Overseerr**: Use the Vercel-hosted version
+- **Local Overseerr**: Must self-host the addon on the same network
+- **No Data Storage**: Your config is encoded in the addon URL, not stored on servers
 
-No Data Storage: Your config is encoded in the addon URL, not stored on servers
+## 🔒 Privacy & Security
 
-🔒 Privacy & Security
-✅ No accounts required
+- ✅ **No accounts required**
+- ✅ **No data stored** - configuration lives in your addon URL
+- ✅ **Your API keys stay with you**
+- ✅ **Open source** - completely transparent
+- ✅ **Self-hostable** - no cloud dependencies when running locally
 
-✅ No data stored - configuration lives in your addon URL
+## 🐛 Troubleshooting
 
-✅ Your API keys stay with you
+### **Common Issues**
 
-✅ Open source - completely transparent
+**"Cannot test local IP configuration"**
+- This is expected! The test can't reach your local network from the cloud
+- Your addon will work when used locally with Stremio
 
-✅ Self-hostable - no cloud dependencies when running locally
+**"Request not showing in Overseerr"**
+- Check your Overseerr API key has correct permissions
+- Verify your Overseerr URL is accessible
+- Ensure TMDB API key is valid
 
-🐛 Troubleshooting
-Common Issues
-"Cannot test local IP configuration"
+**"No streams showing in Stremio"**
+- Verify you're using IMDb IDs (ttXXXXXXX) in your catalog
+- Check Stremio is using the correct addon URL
 
-This is expected! The test can't reach your local network from the cloud
-
-Your addon will work when used locally with Stremio
-
-"Request not showing in Overseerr"
-
-Check your Overseerr API key has correct permissions
-
-Verify your Overseerr URL is accessible
-
-Ensure TMDB API key is valid
-
-"No streams showing in Stremio"
-
-Verify you're using IMDb IDs (ttXXXXXXX) in your catalog
-
-Check Stremio is using the correct addon URL
-
-Debug Mode
+### **Debug Mode**
 Access these endpoints for debugging:
+- `http://your-addon-url/health` - Server status
+- `http://your-addon-url/cleanup` - Clear pending requests
 
-http://your-addon-url/health - Server status
+## 🤝 Contributing
 
-http://your-addon-url/cleanup - Clear pending requests
-
-🤝 Contributing
 Contributions welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
 
-Development Setup
-bash
+### **Development Setup**
+```bash
 git clone [your-repo-url]
 npm install
 npm start
-📝 License
+```
+
+## 📝 License
+
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-🙏 Acknowledgments
-Stremio for the amazing media platform
+## 🙏 Acknowledgments
 
-Overseerr for fantastic request management
+- [Stremio](https://www.stremio.com/) for the amazing media platform
+- [Overseerr](https://overseerr.dev/) for fantastic request management
+- [TMDB](https://www.themoviedb.org/) for comprehensive metadata
 
-TMDB for comprehensive metadata
+---
+
+**Docker Hub**: [plsharevme/stremio-overseerr-addon](https://hub.docker.com/r/plsharevme/stremio-overseerr-addon)
