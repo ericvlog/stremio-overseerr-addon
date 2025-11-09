@@ -178,19 +178,19 @@ function createStreamObject(title, type, tmdbId, season = null, episode = null, 
 
     let streamTitle;
     if (type === 'movie') {
-        streamTitle = `Request "${title}"`;
+        streamTitle = `🎬 Request Movie: "${title}"`;
     } else if (season && episode) {
         if (requestType === 'season') {
-            streamTitle = `Request Season ${season} of "${title}"`;
+            streamTitle = `📺 Request Entire Season ${season} of "${title}"`;
         } else if (requestType === 'series') {
-            streamTitle = `Request Entire Series "${title}"`;
+            streamTitle = `🏠 Request Complete Series: "${title}" (All Seasons)`;
         } else {
-            streamTitle = `Request S${season}E${episode} of "${title}"`;
+            streamTitle = `📺 Request S${season}E${episode} of "${title}"`;
         }
     } else if (season) {
-        streamTitle = `Request Season ${season} of "${title}"`;
+        streamTitle = `📺 Request Entire Season ${season} of "${title}"`;
     } else {
-        streamTitle = `Request "${title}"`;
+        streamTitle = `🏠 Request Complete Series: "${title}" (All Seasons)`;
     }
 
     const params = new URLSearchParams({
