@@ -572,7 +572,7 @@ app.get("/health", (req, res) => {
     });
 });
 
-// ─── Configuration Testing Endpoint ─────────────────
+// ─── Configuration Testing Endpoint (UPDATED FOR LOCAL IPs) ─────────────────
 app.post("/api/test-configuration", express.json(), async (req, res) => {
     try {
         const { tmdbKey, overseerrUrl, overseerrApi } = req.body;
@@ -595,27 +595,61 @@ app.post("/api/test-configuration", express.json(), async (req, res) => {
             results.push({ service: 'TMDB', status: 'error', message: `Connection failed: ${error.message}` });
         }
 
-        // Test Overseerr API
+        // Test Overseerr API - with special handling for local IPs
         try {
             // Normalize the URL - remove trailing slashes
             const normalizedUrl = overseerrUrl.replace(/\/$/, '');
-            const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
-                headers: { 'X-Api-Key': overseerrApi }
-            });
-
-            if (overseerrResponse.ok) {
-                results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
+            const urlObj = new URL(normalizedUrl);
+            const hostname = urlObj.hostname;
+            
+            // Check if it's a local IP address
+            const isLocalIP = hostname === 'localhost' || 
+                             hostname.startsWith('192.168.') ||
+                             hostname.startsWith('10.') ||
+                             hostname.startsWith('172.') ||
+                             hostname.startsWith('127.') ||
+                             hostname.startsWith('169.254.');
+            
+            if (isLocalIP) {
+                // For local IPs, we can't test from Vercel, but the addon will work when used locally
+                results.push({ 
+                    service: 'Overseerr', 
+                    status: 'warning', 
+                    message: 'Local IP detected - cannot test from server, but will work when you use Stremio on the same network' 
+                });
             } else {
-                results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
+                // For public domains, test normally
+                const overseerrResponse = await fetch(`${normalizedUrl}/api/v1/user`, {
+                    headers: { 'X-Api-Key': overseerrApi }
+                });
+
+                if (overseerrResponse.ok) {
+                    results.push({ service: 'Overseerr', status: 'success', message: 'URL and API key are valid' });
+                } else {
+                    results.push({ service: 'Overseerr', status: 'error', message: `Connection failed (HTTP ${overseerrResponse.status})` });
+                }
             }
         } catch (error) {
-            results.push({ service: 'Overseerr', status: 'error', message: `Connection failed: ${error.message}` });
+            // If URL parsing fails, it might be a local hostname
+            if (overseerrUrl.includes('localhost') || overseerrUrl.includes('192.168.') || overseerrUrl.includes('.local')) {
+                results.push({ 
+                    service: 'Overseerr', 
+                    status: 'warning', 
+                    message: 'Local network detected - cannot test from server, but will work when you use Stremio on the same network' 
+                });
+            } else {
+                results.push({ service: 'Overseerr', status: 'error', message: `Connection failed: ${error.message}` });
+            }
         }
 
-        const allSuccess = results.every(result => result.status === 'success');
+        // Consider it successful if TMDB works and Overseerr is either successful or a local IP warning
+        const tmdbSuccess = results.find(r => r.service === 'TMDB' && r.status === 'success');
+        const overseerrOk = results.find(r => r.service === 'Overseerr' && (r.status === 'success' || r.status === 'warning'));
+        
+        const overallSuccess = !!(tmdbSuccess && overseerrOk);
 
         res.json({
-            success: allSuccess,
+            success: overallSuccess,
             results: results
         });
 
@@ -672,6 +706,7 @@ app.get("/", (req, res) => {
             .test-result { margin: 10px 0; padding: 10px; border-radius: 4px; }
             .test-success { background: #155724; color: #d4edda; }
             .test-error { background: #721c24; color: #f8d7da; }
+            .test-warning { background: #856404; color: #fff3cd; padding: 10px; border-radius: 4px; margin: 10px 0; }
             .loading { color: #17a2b8; }
         </style>
     </head>
@@ -812,8 +847,17 @@ app.get("/", (req, res) => {
                     }
 
                     result.results.forEach(test => {
-                        const icon = test.status === 'success' ? '✅' : '❌';
-                        const className = test.status === 'success' ? 'test-success' : 'test-error';
+                        let icon, className;
+                        if (test.status === 'success') {
+                            icon = '✅';
+                            className = 'test-success';
+                        } else if (test.status === 'warning') {
+                            icon = '⚠️';
+                            className = 'test-warning';
+                        } else {
+                            icon = '❌';
+                            className = 'test-error';
+                        }
                         html += '<div class="test-result ' + className + '">' + icon + ' <strong>' + test.service + ':</strong> ' + test.message + '</div>';
                     });
 
